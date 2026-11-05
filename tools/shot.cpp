@@ -15,7 +15,7 @@ int main(int argc, char** argv)
     ReChordProcessor proc;
     proc.prepareToPlay(48000, 512);
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
-    ed->setSize(960, 600);
+    ed->setSize(960, 654);
     auto* dev = findChild<Device>(ed.get());
     auto* view = findChild<LinkView>(ed.get());
     auto* box = findChild<PresetBox>(ed.get());
