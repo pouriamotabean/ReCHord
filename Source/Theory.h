@@ -43,6 +43,8 @@ inline std::vector<int> chordTones(const Chord& c, int n)
     static const std::vector<int> iv[] = { { 0, 4, 7 }, { 0, 3, 7 }, { 0, 4, 7, 10 }, { 0, 4, 7, 11 },
                                            { 0, 3, 7, 10 }, { 0, 2, 7 }, { 0, 5, 7 }, { 0, 3, 6 } };
     std::vector<int> t = iv[std::clamp(c.quality, 0, kNumQualities - 1)];
+    if (n == 1) t = { 0 };                                         // bass: the root
+    else if (n == 2) t = { 0, t.size() > 2 ? t[2] : t.back() };    // root + fifth
     if ((int) t.size() < n) t.push_back(0);
     if ((int) t.size() > n) t.erase(t.begin() + 2);
     for (auto& x : t) x = (x + c.root) % 12;
@@ -155,7 +157,7 @@ inline float shapeCost(const Voicing& v, int n, int centre)
     for (size_t i = 0; i < (size_t) n; ++i) mean += (float) v[i];
     mean /= (float) n;
     const int span = v[(size_t) n - 1] - v[0];
-    return std::abs(mean - (float) centre) * 0.35f + (float) std::max(0, span - 12) * 0.25f + (v[0] < 52 ? (float) (52 - v[0]) * 0.5f : 0.f);
+    return std::abs(mean - (float) centre) * 0.35f + (float) std::max(0, span - 12) * 0.25f + (n >= 3 && v[0] < 52 ? (float) (52 - v[0]) * 0.5f : 0.f);   // low thirds get muddy (not for a bass line)
 }
 
 // best voicings for a chain of chords; cyclic = the last one also leads back to the first
@@ -206,14 +208,14 @@ inline std::vector<Voicing> bestChain(const std::vector<Chord>& ch, int n, int c
 // a fresh score from the pattern: slots, smart voicing, default links (all edits dropped)
 inline void buildScore(Score& s, const Pattern& p, int n, int octave)
 {
-    n = std::clamp(n, 3, kMaxVoices);
+    n = std::clamp(n, 1, kMaxVoices);
     Score fresh;
     s = fresh;
     s.nVoices = n;
     s.nSlots = p.slots(s.key, s.start);
     s.exitMode = p.exitMode;
     s.entryMode = p.exitMode == Loop ? Loop : p.entryMode;
-    const int centre = 64 + 12 * octave;
+    const int centre = (n == 1 ? 43 : n == 2 ? 50 : 64) + 12 * octave;   // 1-2 voices: a bass line, lower down
 
     std::vector<Chord> chain;
     const bool withEntry = !s.loop() && s.entryMode == ToChord, withExit = !s.loop() && s.exitMode == ToChord;

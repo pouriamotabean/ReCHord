@@ -4,7 +4,7 @@
 #include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "1.5.0"
+ #define RECHORD_VERSION "1.6.0"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -89,7 +89,7 @@ private:
     std::atomic<double> seekBeat { -1.0 };
     int lastVoices = 3;
     // keyboard
-    bool held[128] {}, sustained[128] {}, pedal = false, keysChanged = false;
+    bool held[128] {}, sustained[128] {}, stale[128] {}, fresh[128] {}, pedal = false;
     int chordWait = -1, graceLeft = 0;
     // LEARN
     struct LearnEvent { double beat; int key; bool on; };

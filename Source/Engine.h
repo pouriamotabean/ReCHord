@@ -238,7 +238,7 @@ public:
         chorusPos = 0;
         for (auto& p : chorusPh) p = 0;
         wowPh = flutPh = 0;
-        toneL = toneR = 0;
+        toneL = toneR = 0; hpL = hpR = sideLp = revHpL = revHpR = 0;
         reverb.prepare(sr);
         echoLen = (int) (sr * 2.2) + 4;
         echo[0].assign((size_t) echoLen, 0.f); echo[1].assign((size_t) echoLen, 0.f);
@@ -447,7 +447,7 @@ private:
         switch (prm.osc)
         {
             case OscFM:      fc = f0 * (2.5f + 11.f * br); break;
-            case OscAnalog:  fc = f0 * (1.2f + 16.f * br * br) * (1.f + 0.5f * std::exp(-v.age / 0.25f)); q = 0.85f + 0.6f * br; break;
+            case OscAnalog:  fc = f0 * (1.2f + 16.f * br * br); q = 0.85f + 0.6f * br; break;
             case OscStrings: fc = f0 * (1.5f + 12.f * br * br); q = 0.6f; break;
             case OscTine:    fc = f0 * (2.f + 12.f * br); break;
             case OscSine:    fc = f0 * (3.f + 14.f * br); break;
@@ -492,8 +492,7 @@ private:
             {
                 case OscFM:
                 {
-                    const float bite = 0.72f + 0.28f * std::exp(-v.age / 0.16f);
-                    const float index = (0.3f + 2.1f * ch) * bite, fbAmt = 0.1f + 0.45f * ch;
+                    const float index = (0.3f + 2.1f * ch) * 0.8f, fbAmt = 0.1f + 0.45f * ch;     // body only: no bite at the start
                     const float mod = (float) std::sin(v.phm * twoPi + fbAmt * v.fb);
                     v.fb = 0.5f * (v.fb + mod);
                     const float c1 = (float) std::sin(v.ph[0] * twoPi + index * mod), c2 = (float) std::sin(v.ph[1] * twoPi + index * 0.85f * mod);
@@ -547,15 +546,13 @@ private:
                 }
                 case OscTine:
                 {
-                    // Rhodes colour, held: a warm 1:1 FM body that barks a little at the start and settles,
-                    // plus the bell of the tine (CHARACTER) that rings out fast
-                    const float bark = 0.42f + 0.75f * std::exp(-v.age / 0.22f);
+                    // Rhodes colour, held from the first moment: a warm 1:1 FM body + a steady shine of the tine (CHARACTER)
+                    const float bark = 0.42f;                                           // held body, no struck attack
                     const float mod = (float) std::sin(v.phm * twoPi);
                     const float body = (float) std::sin(v.ph[0] * twoPi + bark * mod);
                     const float body2 = (float) std::sin(v.ph[1] * twoPi + bark * 0.8f * mod);
-                    const float bell = ch * ((float) std::sin(v.ph[4] * twoPi) * 0.22f * std::exp(-v.age / 0.11f)
-                                           + (float) std::sin(v.ph[5] * twoPi) * 0.12f * std::exp(-v.age / 0.035f));
-                    const float settle = 0.62f + 0.38f * std::exp(-v.age / 0.8f);     // like a struck key, then held
+                    const float bell = ch * ((float) std::sin(v.ph[4] * twoPi) * 0.07f + (float) std::sin(v.ph[5] * twoPi) * 0.025f);   // a steady glassy shine
+                    const float settle = 1.f;
                     float d = 0;
                     if (dbl > 0.001f)
                     {
@@ -688,6 +685,7 @@ private:
         const float depth = ens ? 0.0018f + 0.0026f * prm.character : 0.0022f;
         const float mix = ens ? 0.45f + 0.45f * prm.character : 0.36f;
         const float wet = prm.space * 0.85f;
+        const float hpA = 1.f - std::exp(-2.f * 3.14159265f * 250.f / (float) sr), monoA = 1.f - std::exp(-2.f * 3.14159265f * 150.f / (float) sr);
         const float trem = prm.osc == OscTine ? std::clamp(prm.vibratoCents / 50.f, 0.f, 1.f) * 0.7f : 0.f;
         const float echoWet = prm.space * prm.space * 0.55f;                   // the echo comes in as SPACE goes up
         const double echoDelay = std::min((double) echoLen - 2.0, 0.75 * 60.0 / std::max(20.0, curBpm) * sr);
@@ -695,8 +693,10 @@ private:
         {
             toneL += toneA * (L[i] - toneL); toneR += toneA * (R[i] - toneR);
             float inL = toneL * pre, inR = toneR * pre;
-            chorusBuf[0][(size_t) chorusPos] = inL;
-            chorusBuf[1][(size_t) chorusPos] = inR;
+            // the low end stays dry, centred and tight: the chorus and the room only get what is above ~250 Hz
+            hpL += hpA * (inL - hpL); hpR += hpA * (inR - hpR);
+            chorusBuf[0][(size_t) chorusPos] = inL - hpL;
+            chorusBuf[1][(size_t) chorusPos] = inR - hpR;
             // three slow lines (a string ensemble); other sounds use two of them as a light chorus
             const double r1 = ens ? 0.63 : 0.37, r2 = ens ? 0.79 : 0.43, r3 = 0.97;
             chorusPh[0] += r1 / sr; if (chorusPh[0] >= 1) chorusPh[0] -= 1;
@@ -736,10 +736,17 @@ private:
                 echoPos = (echoPos + 1) % echoLen;
                 oL += eL * echoWet; oR += eR * echoWet;
             }
+            {
+                // mono below ~150 Hz
+                const float mid = 0.5f * (oL + oR), side = 0.5f * (oL - oR);
+                sideLp += monoA * (side - sideLp);
+                oL = mid + (side - sideLp); oR = mid - (side - sideLp);
+            }
             if (wet > 0.001f)
             {
                 float rl, rr;
-                reverb.process(oL, oR, rl, rr);
+                revHpL += hpA * (oL - revHpL); revHpR += hpA * (oR - revHpR);
+                reverb.process(oL - revHpL, oR - revHpR, rl, rr);
                 oL = oL * (1.f - wet * 0.35f) + rl * wet;
                 oR = oR * (1.f - wet * 0.35f) + rr * wet;
             }
@@ -766,7 +773,7 @@ private:
     std::vector<float> chorusBuf[2];
     int chorusLen = 1, chorusPos = 0;
     double chorusPh[3] {}, wowPh = 0, flutPh = 0;
-    float toneL = 0, toneR = 0;
+    float toneL = 0, toneR = 0, hpL = 0, hpR = 0, sideLp = 0, revHpL = 0, revHpR = 0;
     Reverb reverb;
     std::vector<float> echo[2];
     int echoLen = 1, echoPos = 0;

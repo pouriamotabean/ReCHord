@@ -1062,8 +1062,8 @@ public:
 private:
     ReChordProcessor& proc;
     int hover = -1, tab = 0;
-    static constexpr int kGroups = 8;
-    static const char* groupName(int c) { static const char* g[] = { "PIANO", "BOWED", "KEYS", "DREAM", "LEADS", "STRINGS", "VOICES", "PADS" }; return g[c]; }
+    static constexpr int kGroups = 9;
+    static const char* groupName(int c) { static const char* g[] = { "PIANO", "BOWED", "BASS", "KEYS", "DREAM", "LEADS", "STRINGS", "VOICES", "PADS" }; return g[c]; }
     static int groupOf(int i) { for (int k = 0; k < kGroups; ++k) if (juce::String(rc::kPresets[i].group) == groupName(k)) return k; return 0; }
     juce::Rectangle<float> tabCell(int t) const { const float w = ((float) getWidth() - 36.f - (kGroups - 1) * 6.f) / (float) kGroups; return { 18.f + t * (w + 6.f), 40.f, w, 28.f }; }
     juce::Rectangle<float> item(int i) const

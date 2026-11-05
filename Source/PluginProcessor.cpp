@@ -34,7 +34,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
     p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "octave", 1 }, "Octave", -3, 2, 0,
         juce::AudioParameterIntAttributes().withStringFromValueFunction([](int v, int) { return v == 0 ? juce::String("0") : (v > 0 ? "+" : "") + juce::String(v) + " oct"; })));
     fl("liveGlide", "Keyboard glide", 0.f, 2000.f, 250.f, 300.f, msText);
-    p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "voices", 1 }, "Voices", 3, 4, 3));
+    p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "voices", 1 }, "Voices", 1, 4, 3,
+        juce::AudioParameterIntAttributes().withStringFromValueFunction([](int v, int) { return v == 1 ? juce::String("1 bass") : v == 2 ? juce::String("2 bass") : juce::String(v); })));
     fl("volume", "Volume", -30.f, 6.f, rc::kPresets[0].volumeDb, 0, [](float v, int) { return juce::String(v, 1) + " dB"; });
     p.push_back(std::make_unique<juce::AudioParameterBool>(PID { "listen", 1 }, "Listen", false));
     return { p.begin(), p.end() };
@@ -228,41 +229,71 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     hostBpm = bpm;
     hostBarBeats = barBeats;
 
-    // ---- the keyboard: notes held (+ the sustain pedal); a new chord is taken 25 ms after its first key ----
+    // ---- the keyboard: notes held (+ the sustain pedal). A chord is taken 70 ms after its first key; when you
+    //      play legato, the keys still held from the last chord are left out of the new one; a gap up to 0.5 s
+    //      between chords still glides ----
     const double spb = getSampleRate() * 60.0 / bpm;
     for (const auto m : midi)
     {
         const auto msg = m.getMessage();
         const int key = msg.getNoteNumber();
-        if (msg.isNoteOn()) { held[key] = true; sustained[key] = false; keysChanged = true; }
-        else if (msg.isNoteOff()) { held[key] = false; if (pedal) sustained[key] = true; keysChanged = true; }
+        if (msg.isNoteOn())
+        {
+            held[key] = true; sustained[key] = false; stale[key] = false;
+            if (chordWait < 0) { chordWait = (int) (getSampleRate() * 0.07); for (auto& x : fresh) x = false; }
+            fresh[key] = true;
+        }
+        else if (msg.isNoteOff())
+        {
+            held[key] = false;
+            if (pedal && !stale[key]) sustained[key] = true;
+            if (!sustained[key]) stale[key] = false;
+            if (chordWait < 0) { chordWait = (int) (getSampleRate() * 0.07); for (auto& x : fresh) x = false; }
+        }
         else if (msg.isSustainPedalOn()) pedal = true;
-        else if (msg.isSustainPedalOff()) { pedal = false; for (auto& x : sustained) x = false; keysChanged = true; }
-        else if (msg.isAllNotesOff() || msg.isAllSoundOff()) { for (auto& x : held) x = false; for (auto& x : sustained) x = false; keysChanged = true; }
-        // LEARN: every note while recording, with its position in beats
+        else if (msg.isSustainPedalOff())
+        {
+            pedal = false;
+            for (int k = 0; k < 128; ++k) if (sustained[k]) { sustained[k] = false; stale[k] = false; }
+            if (chordWait < 0) { chordWait = (int) (getSampleRate() * 0.07); for (auto& x : fresh) x = false; }
+        }
+        else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+        {
+            for (int k = 0; k < 128; ++k) held[k] = sustained[k] = stale[k] = fresh[k] = false;
+            chordWait = 0;
+        }
         if (learnState.load() == 2 && hostPlaying && (msg.isNoteOn() || msg.isNoteOff()) && learnCount < (int) learnEvents.size())
             learnEvents[(size_t) learnCount++] = { ppq + m.samplePosition / spb, key, msg.isNoteOn() };
     }
     midi.clear();
-    if (keysChanged) { keysChanged = false; chordWait = (int) (getSampleRate() * 0.025); }
     if (chordWait >= 0)
     {
         chordWait -= n;
         if (chordWait < 0)
         {
-            int notes[128], k = 0;
-            for (int i = 0; i < 128; ++i) if (held[i] || sustained[i]) notes[k++] = i;
-            if (k == 0 && engine.liveActive()) graceLeft = (int) (getSampleRate() * 0.25);    // a short gap between chords still glides
-            else engine.setLive(notes, k);
+            bool anyFresh = false;
+            for (int k = 0; k < 128; ++k) anyFresh = anyFresh || fresh[k];
+            int notes[128], c = 0;
+            for (int k = 0; k < 128; ++k)
+            {
+                const bool down = held[k] || sustained[k];
+                if (!down) continue;
+                if (anyFresh && !fresh[k]) { stale[k] = true; continue; }    // still held from the chord before
+                if (stale[k]) continue;
+                notes[c++] = k;
+            }
+            for (auto& x : fresh) x = false;
+            if (c == 0)
+            {
+                if (engine.liveActive() && anyFresh == false) graceLeft = (int) (getSampleRate() * 0.5);
+            }
+            else { graceLeft = 0; engine.setLive(notes, c); }
         }
     }
     if (graceLeft > 0)
     {
         graceLeft -= n;
-        bool any = false;
-        for (int i = 0; i < 128; ++i) any = any || held[i] || sustained[i];
-        if (any) graceLeft = 0;
-        else if (graceLeft <= 0) engine.setLive(nullptr, 0);
+        if (graceLeft <= 0) engine.setLive(nullptr, 0);
     }
 
     // ---- LEARN: armed -> records from the next bar line for 4 bars of Cubase playback ----
@@ -444,7 +475,7 @@ bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeat
         const int c = (int) played[(size_t) i].size();
         if (count < 0) count = c; else if (c != count) same = false;
     }
-    if (same && (count == 3 || count == 4))
+    if (same && count >= 1 && count <= 4)
     {
         auto* vp = apvts.getParameter("voices");
         vp->setValueNotifyingHost(vp->convertTo0to1((float) count));
