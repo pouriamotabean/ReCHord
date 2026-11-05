@@ -904,23 +904,23 @@ public:
     {
         using namespace ui;
         const int m = (int) proc.apvts.getRawParameterValue("osc")->load();
-        const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE", "TINE", "SINE" };
+        const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE", "TINE", "SINE", "KEYS", "BOWED" };
         g.setColour(chip); g.fillRoundedRectangle(getLocalBounds().toFloat(), 10.f);
-        for (int i = 0; i < 6; ++i)
+        for (int i = 0; i < 8; ++i)
         {
             const auto r = seg(i);
             if (m == i) { g.setColour(chipOn); g.fillRoundedRectangle(r, 8.f); }
             else if (hover == i) { g.setColour(chip2); g.fillRoundedRectangle(r, 8.f); }
-            g.setColour(m == i ? white : soft); g.setFont(mono(8.5f, true));
-            g.drawText(names[i], r.withTrimmedLeft(m == i ? 8.f : 0.f), juce::Justification::centred);
-            if (m == i) { g.setColour(orange); g.fillEllipse(r.getX() + 7.f, r.getCentreY() - 2.5f, 5.f, 5.f); }
+            g.setColour(m == i ? white : soft); g.setFont(mono(8.f, true));
+            g.drawText(names[i], r.withTrimmedLeft(m == i ? 6.f : 0.f), juce::Justification::centred);
+            if (m == i) { g.setColour(orange); g.fillEllipse(r.getX() + 4.f, r.getCentreY() - 2.f, 4.f, 4.f); }
         }
     }
-    void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < 6; ++i) if (seg(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
+    void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < 8; ++i) if (seg(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
     void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
     void mouseDown(const juce::MouseEvent& e) override
     {
-        for (int i = 0; i < 6; ++i)
+        for (int i = 0; i < 8; ++i)
             if (seg(i).contains(e.position))
             {
                 auto* p = proc.apvts.getParameter("osc");
@@ -933,8 +933,8 @@ private:
     int hover = -1;
     juce::Rectangle<float> seg(int i) const
     {
-        const float w = ((float) getWidth() - 6.f) / 3.f, h = ((float) getHeight() - 6.f) / 2.f;
-        return { 3.f + (i % 3) * w, 3.f + (i / 3) * h, w, h };
+        const float w = ((float) getWidth() - 6.f) / 4.f, h = ((float) getHeight() - 6.f) / 2.f;
+        return { 3.f + (i % 4) * w, 3.f + (i / 4) * h, w, h };
     }
 };
 
@@ -984,12 +984,13 @@ private:
     int at(juce::Point<float> p) const { return arrow(0).contains(p) ? 0 : arrow(2).contains(p) ? 2 : 1; }
 };
 
-// every preset, by group
+// every preset: a tab per group, the group's presets under it
 class PresetPanel : public juce::Component
 {
 public:
     explicit PresetPanel(ReChordProcessor& p) : proc(p) {}
     std::function<void()> onClose;
+    void visibilityChanged() override { if (isVisible()) tab = groupOf(proc.presetIndex); }
     void paint(juce::Graphics& g) override
     {
         using namespace ui;
@@ -1001,21 +1002,26 @@ public:
         g.drawText("SOUNDS", juce::Rectangle<float>(18.f, 12.f, 100.f, 14.f), juce::Justification::centredLeft);
         g.setColour(faint); g.setFont(mono(8.5f));
         g.drawText("a preset changes only the sound - chords, connections and glides stay", juce::Rectangle<float>(100.f, 12.f, 500.f, 14.f), juce::Justification::centredLeft);
-        for (int c = 0; c < kGroups; ++c)
+        for (int t = 0; t < kGroups; ++t)
         {
-            const auto col = column(c);
-            g.setColour(faint); g.setFont(mono(8.f, true));
-            g.drawText(groupName(c), col.withHeight(14.f), juce::Justification::centredLeft);
+            const auto rr = tabCell(t);
+            const bool on = tab == t, hot = hover == 300 + t, cur = groupOf(proc.presetIndex) == t;
+            g.setColour(on ? chipOn : hot ? chip2.brighter(0.05f) : chip2);
+            g.fillRoundedRectangle(rr, 8.f);
+            if (cur) { g.setColour(orange); g.fillEllipse(rr.getX() + 8.f, rr.getCentreY() - 2.5f, 5.f, 5.f); }
+            g.setColour(on ? white : soft); g.setFont(mono(9.f, true));
+            g.drawText(groupName(t), rr.withTrimmedLeft(cur ? 8.f : 0.f), juce::Justification::centred);
         }
         for (int i = 0; i < rc::kNumPresets; ++i)
         {
+            if (groupOf(i) != tab) continue;
             const auto cell = item(i);
             const bool on = proc.presetIndex == i, hot = hover == i;
             g.setColour(on ? orange : hot ? chipOn : chip2);
             g.fillRoundedRectangle(cell, 8.f);
             g.setColour(on ? juce::Colours::white : hot ? white : soft);
-            g.setFont(inter(11.5f, on ? 600 : 500));
-            g.drawText(rc::kPresets[i].name, cell.reduced(9.f, 0.f), juce::Justification::centredLeft);
+            g.setFont(inter(12.5f, on ? 600 : 500));
+            g.drawText(rc::kPresets[i].name, cell.reduced(14.f, 0.f), juce::Justification::centredLeft);
         }
         const auto x = closeCell();
         g.setColour(hover == 200 ? white : dim);
@@ -1028,29 +1034,29 @@ public:
     {
         const int h = at(e.position);
         if (h == 200) { if (onClose) onClose(); return; }
+        if (h >= 300) { tab = h - 300; repaint(); return; }
         if (h >= 0) { proc.loadPreset(h); repaint(); }
     }
 private:
     ReChordProcessor& proc;
-    int hover = -1;
-    static constexpr int kGroups = 6;
-    static const char* groupName(int c) { static const char* g[] = { "KEYS", "DREAM", "LEADS", "STRINGS", "VOICES", "PADS" }; return g[c]; }
-    juce::Rectangle<float> column(int c) const { const float w = ((float) getWidth() - 36.f - (kGroups - 1) * 10.f) / (float) kGroups; return { 18.f + c * (w + 10.f), 40.f, w, (float) getHeight() - 52.f }; }
+    int hover = -1, tab = 0;
+    static constexpr int kGroups = 8;
+    static const char* groupName(int c) { static const char* g[] = { "PIANO", "BOWED", "KEYS", "DREAM", "LEADS", "STRINGS", "VOICES", "PADS" }; return g[c]; }
+    static int groupOf(int i) { for (int k = 0; k < kGroups; ++k) if (juce::String(rc::kPresets[i].group) == groupName(k)) return k; return 0; }
+    juce::Rectangle<float> tabCell(int t) const { const float w = ((float) getWidth() - 36.f - (kGroups - 1) * 6.f) / (float) kGroups; return { 18.f + t * (w + 6.f), 40.f, w, 28.f }; }
     juce::Rectangle<float> item(int i) const
     {
-        const char* g = rc::kPresets[i].group;
-        int c = 0;
-        for (int k = 0; k < kGroups; ++k) if (juce::String(g) == groupName(k)) c = k;
         int row = 0;
-        for (int k = 0; k < i; ++k) if (juce::String(rc::kPresets[k].group) == g) ++row;
-        const auto col = column(c);
-        return { col.getX(), col.getY() + 20.f + row * 38.f, col.getWidth(), 32.f };
+        for (int k = 0; k < i; ++k) if (groupOf(k) == groupOf(i)) ++row;
+        const float w = ((float) getWidth() - 36.f - 2 * 10.f) / 3.f;
+        return { 18.f + (row % 3) * (w + 10.f), 86.f + (row / 3) * 50.f, w, 42.f };
     }
     juce::Rectangle<float> closeCell() const { return { (float) getWidth() - 36.f, 8.f, 24.f, 24.f }; }
     int at(juce::Point<float> p) const
     {
         if (closeCell().contains(p)) return 200;
-        for (int i = 0; i < rc::kNumPresets; ++i) if (item(i).contains(p)) return i;
+        for (int t = 0; t < kGroups; ++t) if (tabCell(t).contains(p)) return 300 + t;
+        for (int i = 0; i < rc::kNumPresets; ++i) if (groupOf(i) == tab && item(i).contains(p)) return i;
         return -1;
     }
 };
@@ -1148,14 +1154,26 @@ public:
         // CHARACTER means something else for each sound
         kChar.titleText = [this]
         {
-            const char* t[] = { "BITE", "DETUNE", "ENSEMBLE", "VOWEL", "BELL", "HARMONICS" };
-            return juce::String(t[juce::jlimit(0, 5, (int) proc.apvts.getRawParameterValue("osc")->load())]);
+            const char* t[] = { "BITE", "DETUNE", "ENSEMBLE", "VOWEL", "BELL", "HARMONICS", "BODY", "BODY" };
+            return juce::String(t[juce::jlimit(0, 7, (int) proc.apvts.getRawParameterValue("osc")->load())]);
         };
         kChar.valueText = [this]
         {
             const float c = proc.apvts.getRawParameterValue("character")->load();
-            if ((int) proc.apvts.getRawParameterValue("osc")->load() == rc::OscVoice)
+            const int o = (int) proc.apvts.getRawParameterValue("osc")->load();
+            if (o == rc::OscVoice)
                 return juce::String(c < 0.25f ? "ah" : c < 0.42f ? "ah-oh" : c < 0.58f ? "oh" : c < 0.75f ? "oh-oo" : "oo");
+            if (o == rc::OscKeys || o == rc::OscBowed)
+            {
+                // the measured body it is nearest to (between two = both names)
+                const int n = o == rc::OscKeys ? rc::kNumKeyBodies : rc::kNumStringBodies;
+                const auto* B = o == rc::OscKeys ? rc::kKeyBodies : rc::kStringBodies;
+                const float x = c * (float) (n - 1);
+                const int i = juce::jlimit(0, n - 1, juce::roundToInt(x));
+                if (std::abs(x - (float) i) < 0.2f) return juce::String(B[i].name).toLowerCase();
+                const int a = (int) x;
+                return juce::String(B[a].name).toLowerCase().upToFirstOccurrenceOf(" ", false, false) + ">" + juce::String(B[a + 1].name).toLowerCase().upToFirstOccurrenceOf(" ", false, false);
+            }
             return juce::String(juce::roundToInt(c * 100)) + "%";
         };
 
@@ -1221,7 +1239,7 @@ public:
         listen.setBounds(618, 20, 76, 32);
         type.setBounds(196, 16, 236, 40);
         presetBox.setBounds(440, 16, 170, 40);
-        presets.setBounds(24 + 14, 72 + 12, 912 - 28, 288);
+        presets.setBounds(24 + 14, 72 + 12, 912 - 28, 250);
 
         view.setBounds(24, 72, 912, 300);
         ui::Bars b;

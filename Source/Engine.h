@@ -1,18 +1,22 @@
 // ReChord - the sound (FM / Analog / Strings / Voice) + the glide sequencer (no JUCE: also used by the test tool)
 #pragma once
 #include "Theory.h"
+#include "Bodies.h"
 #include <cmath>
+#include <memory>
+#include <mutex>
 #include <cstring>
 #include <vector>
 
 namespace rc
 {
-enum OscType { OscFM = 0, OscAnalog = 1, OscStrings = 2, OscVoice = 3, OscTine = 4, OscSine = 5, kNumOsc };
+enum OscType { OscFM = 0, OscAnalog = 1, OscStrings = 2, OscVoice = 3, OscTine = 4, OscSine = 5, OscKeys = 6, OscBowed = 7, kNumOsc };
 
 struct Params
 {
     int osc = OscFM;
     float character = 0.45f;      // FM: bite  Analog: detune  Strings: ensemble  Voice: vowel ah..oo  Tine: bell  Sine: harmonics
+                                  // Keys / Bowed: which measured body (a morph from the first to the last)
     float attackMs = 35.f, releaseMs = 380.f;
     float bright = 0.45f;         // the filter (follows the pitch)
     float vibratoCents = 16.f;    // depth of the delayed vibrato (Tine: tremolo depth, 0..50 = 0..100%)
@@ -110,6 +114,113 @@ private:
     float combLp[2][8] {};
 };
 
+
+// ---------------- measured bodies -> wavetables ----------------
+// One band-limited single cycle per body every 3 semitones (MIDI 21..120). Harmonic k of a note at f0 gets the
+// level the measured body curve has at k*f0, so every note keeps the instrument's colour where it sits.
+// Built once per sample rate and shared by every Engine.
+class BodyBank
+{
+public:
+    static constexpr int kSize = 2048, kLo = 21, kStep = 3, kNotes = 34;
+    static constexpr int kBodies = kNumKeyBodies + kNumStringBodies;
+
+    static std::shared_ptr<const BodyBank> get(double sr)
+    {
+        static std::mutex m;
+        static std::shared_ptr<const BodyBank> cached;
+        std::lock_guard<std::mutex> lock(m);
+        if (cached == nullptr || std::abs(cached->rate - sr) > 1.0) cached = std::make_shared<const BodyBank>(sr);
+        return cached;
+    }
+    explicit BodyBank(double sr) : rate(sr), data((size_t) kBodies * kNotes * kSize, 0.f)
+    {
+        std::vector<double> phase(200);
+        unsigned seed = 7u;
+        for (auto& p : phase) { seed = seed * 1664525u + 1013904223u; p = (double) (seed >> 8) / 16777216.0 * 6.283185307179586; }
+        std::vector<double> amp(200);
+        for (int b = 0; b < kBodies; ++b)
+        {
+            const Body& body = b < kNumKeyBodies ? kKeyBodies[b] : kStringBodies[b - kNumKeyBodies];
+            for (int j = 0; j < kNotes; ++j)
+            {
+                const double f0 = 440.0 * std::exp2((kLo + j * kStep - 69) / 12.0);
+                const double top = 440.0 * std::exp2((kLo + j * kStep + kStep - 69) / 12.0);
+                const int K = std::max(1, std::min(160, (int) (0.45 * sr / top)));
+                for (int k = 1; k <= K; ++k) amp[(size_t) k] = std::pow(10.0, curveDb(body, f0 * k) / 20.0);
+                float* t = table(b, j);
+                for (int k = 1; k <= K; ++k)
+                {
+                    const double a = amp[(size_t) k];
+                    if (a < 1e-4) continue;
+                    // a sine by rotation (cheap and exact enough for a table)
+                    const double w = 6.283185307179586 * k / kSize;
+                    double c = std::cos(phase[(size_t) k]), sn = std::sin(phase[(size_t) k]);
+                    const double cw = std::cos(w), sw = std::sin(w);
+                    for (int i = 0; i < kSize; ++i)
+                    {
+                        t[i] += (float) (a * sn);
+                        const double nc = c * cw - sn * sw;
+                        sn = sn * cw + c * sw; c = nc;
+                    }
+                }
+                double e = 0;
+                for (int i = 0; i < kSize; ++i) e += (double) t[i] * t[i];
+                const float g = (float) (0.5 / std::sqrt(e / kSize + 1e-12));   // every note at the same loudness
+                for (int i = 0; i < kSize; ++i) t[i] *= g;
+            }
+        }
+    }
+    float* table(int b, int j) { return data.data() + ((size_t) b * kNotes + (size_t) j) * kSize; }
+    const float* table(int b, int j) const { return data.data() + ((size_t) b * kNotes + (size_t) j) * kSize; }
+
+    // one sample of body b at pitch p (MIDI) and phase (0..1): the two nearest tables, crossfaded
+    float read(int b, float p, double phase) const
+    {
+        const float x = std::clamp((p - (float) kLo) / (float) kStep, 0.f, (float) (kNotes - 1) - 0.001f);
+        const int j = (int) x;
+        const float fr = x - (float) j;
+        const double pos = phase * kSize;
+        const int i0 = (int) pos & (kSize - 1), i1 = (i0 + 1) & (kSize - 1);
+        const float fi = (float) (pos - std::floor(pos));
+        const float* a = table(b, j);
+        const float* c = table(b, j + 1);
+        const float va = a[i0] + (a[i1] - a[i0]) * fi, vc = c[i0] + (c[i1] - c[i0]) * fi;
+        return va + (vc - va) * fr;
+    }
+    // CHARACTER 0..1 across the bodies of one family: the two nearest, crossfaded
+    float morph(bool strings, float character, float p, double phase) const
+    {
+        const int n = strings ? kNumStringBodies : kNumKeyBodies, first = strings ? kNumKeyBodies : 0;
+        const float x = std::clamp(character, 0.f, 1.f) * (float) (n - 1);
+        const int b = std::min(n - 2, (int) x);
+        const float fr = x - (float) b;
+        const float v0 = read(first + b, p, phase);
+        return fr < 0.002f ? v0 : v0 + (read(first + b + 1, p, phase) - v0) * fr;
+    }
+    static float noiseDb(bool strings, float character)
+    {
+        const int n = strings ? kNumStringBodies : kNumKeyBodies;
+        const float x = std::clamp(character, 0.f, 1.f) * (float) (n - 1);
+        const int b = std::min(n - 2, (int) x);
+        const float fr = x - (float) b;
+        const Body* B = strings ? kStringBodies : kKeyBodies;
+        return B[b].noiseDb + (B[b + 1].noiseDb - B[b].noiseDb) * fr;
+    }
+    double rate;
+private:
+    std::vector<float> data;
+    static double curveDb(const Body& body, double f)
+    {
+        const double x = std::log(std::clamp(f, (double) kBodyLoHz, (double) kBodyHiHz) / kBodyLoHz) / std::log((double) kBodyHiHz / kBodyLoHz) * (kBodyPoints - 1);
+        const int i = std::min(kBodyPoints - 2, (int) x);
+        const double fr = x - i;
+        double d = body.db[i] + (body.db[i + 1] - body.db[i]) * fr;
+        if (f > kBodyHiHz) d -= 24.0 * std::log2(f / kBodyHiHz);
+        return d;
+    }
+};
+
 class Engine
 {
 public:
@@ -130,6 +241,7 @@ public:
         echo[0].assign((size_t) echoLen, 0.f); echo[1].assign((size_t) echoLen, 0.f);
         echoPos = 0; echoLp[0] = echoLp[1] = echoHp[0] = echoHp[1] = 0;
         tremPh = 0;
+        bodies = BodyBank::get(sr);
     }
     void setScore(const Score& s) { score = s; }
     void setParams(const Params& p) { prm = p; }
@@ -202,7 +314,7 @@ private:
     {
         bool active = false, releasing = false;
         double ph[6] {};                        // oscillator phases
-        double phm = 0, lfo = 0, drift = 0;
+        double phm = 0, lfo = 0, drift = 0, pl[3] { 0.1, 0.45, 0.8 };
         float fb = 0, env = 0, age = 0, pitch = 60, pitchStep = 0, lfoRate = 5.2f, driftRate = 0.2f, pan = 0.f;
         Svf fL, fR, form[3];
         float lpL1 = 0, lpL2 = 0, lpR1 = 0, lpR2 = 0;
@@ -249,7 +361,7 @@ private:
         const float ch = prm.character, br = prm.bright;
         const float f0 = 440.f * std::pow(2.f, (v.pitch - 69.f) / 12.f);
         const float dbl = prm.doubleAmt;
-        static const float oscGain[kNumOsc] = { 1.f, 1.6f, 1.9f, 0.95f, 1.1f, 1.0f };   // the 4 sounds at about the same loudness
+        static const float oscGain[kNumOsc] = { 1.f, 1.6f, 1.9f, 0.95f, 1.1f, 1.0f, 1.2f, 1.38f };   // the 4 sounds at about the same loudness
         const float og = oscGain[std::clamp(prm.osc, 0, kNumOsc - 1)];
 
         // per block: filters
@@ -261,11 +373,14 @@ private:
             case OscStrings: fc = f0 * (1.5f + 12.f * br * br); q = 0.6f; break;
             case OscTine:    fc = f0 * (2.f + 12.f * br); break;
             case OscSine:    fc = f0 * (3.f + 14.f * br); break;
+            case OscKeys:
+            case OscBowed:   fc = f0 * std::exp2(1.f + br * 9.f); break;    // BRIGHT 0.6..1 = the body as measured, lower = darker
             default:         fc = f0 * (3.f + 10.f * br); q = 0.6f; break;
         }
-        fc = std::clamp(fc, 180.f, 16000.f);
+        fc = std::clamp(fc, 180.f, (prm.osc == OscKeys || prm.osc == OscBowed) ? 20000.f : 16000.f);
+        if (prm.osc == OscBowed) v.fR.set(std::clamp(f0 * 3.f, 600.f, 5000.f), 0.7f, sr);    // the bow: noise around the 3rd harmonic
         const float a = 1.f - std::exp(-2.f * 3.14159265f * fc / (float) sr);
-        v.fL.set(fc, q, sr); v.fR.set(fc, q, sr);
+        if (prm.osc != OscBowed) { v.fL.set(fc, q, sr); v.fR.set(fc, q, sr); }
         if (prm.osc == OscVoice)
         {
             // vowel: ah -> oh -> oo (formants F1 F2 F3)
@@ -285,7 +400,7 @@ private:
             else if (v.env < 1.f) v.env = std::min(1.f, v.env + dt / att);
 
             const float vf = std::clamp((v.age - 0.22f) / 0.6f, 0.f, 1.f);
-            const float vib = prm.osc == OscTine ? 0.f : (float) std::sin(v.lfo * twoPi) * prm.vibratoCents * 0.01f * vf * vf;
+            const float vib = (prm.osc == OscTine || prm.osc == OscBowed) ? 0.f : (float) std::sin(v.lfo * twoPi) * prm.vibratoCents * 0.01f * vf * vf;
             v.lfo += v.lfoRate * dt;  if (v.lfo >= 1) v.lfo -= 1;
             v.drift += v.driftRate * dt; if (v.drift >= 1) v.drift -= 1;
             const float drift = (float) std::sin(v.drift * twoPi) * prm.warmth * 0.05f;   // analog drift, up to 5 cents
@@ -400,6 +515,52 @@ private:
                     v.ph[1] += inc * 1.0019; if (v.ph[1] >= 1) v.ph[1] -= 1;
                     l = (s0 * 0.65f + s1 * 0.35f + d) * v.env;
                     r = (s0 * 0.35f + s1 * 0.65f + d) * v.env;
+                    v.lpL1 += a * (l - v.lpL1); v.lpL2 += a * (v.lpL1 - v.lpL2);
+                    v.lpR1 += a * (r - v.lpR1); v.lpR2 += a * (v.lpR1 - v.lpR2);
+                    l = v.lpL2; r = v.lpR2;
+                    break;
+                }
+                case OscKeys:
+                case OscBowed:
+                {
+                    const bool strings = prm.osc == OscBowed;
+                    const auto& bank = *bodies;
+                    float sL = 0, sR = 0;
+                    if (!strings)
+                    {
+                        // the body of a key, held: two "strings" a hair apart (the slow beating of a piano unison)
+                        const float a0 = bank.morph(false, ch, p, v.ph[0]), a1 = bank.morph(false, ch, p, v.ph[1]);
+                        v.ph[0] += inc * std::exp2(-0.014 / 12.0); if (v.ph[0] >= 1) v.ph[0] -= 1;
+                        v.ph[1] += inc * std::exp2(0.014 / 12.0);  if (v.ph[1] >= 1) v.ph[1] -= 1;
+                        sL = a0 * 0.62f + a1 * 0.38f; sR = a0 * 0.38f + a1 * 0.62f;
+                    }
+                    else
+                    {
+                        // a small section: 3 players, each a little out of tune with their own slow vibrato, + bow noise
+                        static const float det[3] = { -0.07f, 0.0f, 0.06f }, rate[3] = { 4.7f, 5.3f, 5.9f }, pan[3] = { 0.8f, 0.5f, 0.2f };
+                        for (int k = 0; k < 3; ++k)
+                        {
+                            v.pl[k] += rate[k] * dt; if (v.pl[k] >= 1) v.pl[k] -= 1;
+                            const float vibk = (float) std::sin(v.pl[k] * twoPi) * (0.04f + prm.vibratoCents * 0.006f) * vf;
+                            const float pk = p + det[k] + vibk;
+                            const float x = bank.morph(true, ch, pk, v.ph[k]);
+                            v.ph[k] += inc * std::exp2((det[k] + vibk) / 12.0); if (v.ph[k] >= 1) v.ph[k] -= 1;
+                            sL += x * pan[k]; sR += x * (1.f - pan[k]);
+                        }
+                        sL *= 0.62f; sR *= 0.62f;
+                        v.noise = v.noise * 1664525u + 1013904223u;
+                        const float nz = ((float) (v.noise >> 8) / 8388608.f - 1.f);
+                        float nlp, nbp;
+                        v.fR.tick(nz, nlp, nbp);
+                        const float bow = nbp * std::pow(10.f, BodyBank::noiseDb(true, ch) / 20.f) * 2.2f;
+                        sL += bow; sR += bow;
+                    }
+                    if (dbl > 0.001f)
+                    {
+                        if (v.low)  { const float d = bank.morph(strings, ch, p - 12.f, v.ph[3]) * dbl * 0.8f; sL += d; sR += d; v.ph[3] += inc * 0.5; if (v.ph[3] >= 1) v.ph[3] -= 1; }
+                        if (v.high) { const float d = bank.morph(strings, ch, p + 12.f, v.ph[4]) * dbl * 0.4f; sL += d; sR += d; v.ph[4] += inc * 2.0; if (v.ph[4] >= 1) v.ph[4] -= 1; }
+                    }
+                    l = sL * v.env; r = sR * v.env;
                     v.lpL1 += a * (l - v.lpL1); v.lpL2 += a * (v.lpL1 - v.lpL2);
                     v.lpR1 += a * (r - v.lpR1); v.lpR2 += a * (v.lpR1 - v.lpR2);
                     l = v.lpL2; r = v.lpR2;
@@ -533,6 +694,7 @@ private:
     int echoLen = 1, echoPos = 0;
     float echoLp[2] {}, echoHp[2] {};
     double tremPh = 0, curBpm = 120;
+    std::shared_ptr<const BodyBank> bodies;
 };
 
 // the 4 bars as a WAV.

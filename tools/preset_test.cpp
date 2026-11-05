@@ -27,7 +27,7 @@ int main(int argc, char** argv)
     const int sr = 48000;
     rc::Pattern pat;
     rc::Score s;
-    rc::buildScore(s, pat, 3, 0);
+    rc::buildScore(s, pat, 3, argc > 2 ? std::atoi(argv[2]) : 0);
     std::vector<float> demoL, demoR;
     for (int i = 0; i < rc::kNumPresets; ++i)
     {

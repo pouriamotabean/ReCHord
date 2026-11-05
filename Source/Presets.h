@@ -40,6 +40,20 @@ inline const Preset kPresets[] = {
     { "Cloud Lead",       "DREAM",   OscSine,    0.20f,  250, 0.40f, 16,  1200, 0.35f, 0.70f, 0.5f, -3.7f },
     { "Ocean Pad",        "DREAM",   OscSine,    0.45f,  700, 0.35f,  8,  2600, 0.50f, 0.75f, 0.3f, -2.7f },
     { "Hum Lead",         "DREAM",   OscFM,      0.18f,   60, 0.22f, 20,   700, 0.60f, 0.40f, 0.0f, -2.9f },
+    // 1.4: bodies measured from the user's reference. PIANO: CHARACTER goes felt piano -> felt piano 2 -> Rhodes.
+    // BOWED: winter -> dreamy (Arnalds) -> texture -> soft -> eternal -> sharp
+    { "Felt Piano",       "PIANO",   OscKeys,    0.00f,   20, 0.55f,  0,   900, 0.20f, 0.35f, 0.0f, -4.0f },
+    { "Felt Piano II",    "PIANO",   OscKeys,    0.50f,   20, 0.55f,  0,   900, 0.20f, 0.35f, 0.0f, -4.0f },
+    { "Rhodes Body",      "PIANO",   OscKeys,    1.00f,   20, 0.55f,  0,  1000, 0.25f, 0.40f, 0.0f, -4.0f },
+    { "Felt to Rhodes",   "PIANO",   OscKeys,    0.75f,   20, 0.55f,  0,   950, 0.25f, 0.40f, 0.0f, -4.0f },
+    { "Upright Haze",     "PIANO",   OscKeys,    0.10f,   25, 0.45f,  0,   900, 0.70f, 0.45f, 0.0f, -2.4f },
+    { "Dream Keys",       "PIANO",   OscKeys,    0.85f,   40, 0.55f,  0,  1400, 0.30f, 0.62f, 0.3f, -3.3f },
+    { "Winter Strings",   "BOWED",   OscBowed,   0.00f,  350, 0.62f,  8,  1600, 0.25f, 0.50f, 0.0f, -4.0f },
+    { "Dreamy Strings",   "BOWED",   OscBowed,   0.20f,  300, 0.62f, 12,  1600, 0.20f, 0.55f, 0.0f, -4.0f },
+    { "Texture Strings",  "BOWED",   OscBowed,   0.40f,  250, 0.62f, 10,  1400, 0.20f, 0.45f, 0.0f, -4.0f },
+    { "Soft Strings",     "BOWED",   OscBowed,   0.60f,  300, 0.62f, 10,  1400, 0.20f, 0.45f, 0.0f, -4.0f },
+    { "Eternal Strings",  "BOWED",   OscBowed,   0.80f,  350, 0.62f, 12,  1800, 0.15f, 0.55f, 0.0f, -4.0f },
+    { "Sharp Strings",    "BOWED",   OscBowed,   1.00f,  150, 0.62f, 18,  1000, 0.15f, 0.40f, 0.0f, -4.0f },
 };
 constexpr int kNumPresets = (int) (sizeof(kPresets) / sizeof(kPresets[0]));
 
