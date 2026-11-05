@@ -215,7 +215,7 @@ inline void buildScore(Score& s, const Pattern& p, int n, int octave)
     s.nSlots = p.slots(s.key, s.start);
     s.exitMode = p.exitMode;
     s.entryMode = p.exitMode == Loop ? Loop : p.entryMode;
-    const int centre = (n == 1 ? 43 : n == 2 ? 50 : 64) + 12 * octave;   // 1-2 voices: a bass line, lower down
+    const int centre = (n == 1 ? 31 : n == 2 ? 38 : 64) + 12 * octave;   // 1-2 voices: a bass line, down where an 808 sits
 
     std::vector<Chord> chain;
     const bool withEntry = !s.loop() && s.entryMode == ToChord, withExit = !s.loop() && s.exitMode == ToChord;

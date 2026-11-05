@@ -10,7 +10,7 @@
 
 namespace rc
 {
-enum OscType { OscFM = 0, OscAnalog = 1, OscStrings = 2, OscVoice = 3, OscTine = 4, OscSine = 5, OscKeys = 6, OscBowed = 7, kNumOsc };
+enum OscType { OscFM = 0, OscAnalog = 1, OscStrings = 2, OscVoice = 3, OscTine = 4, OscSine = 5, OscKeys = 6, OscBowed = 7, Osc808 = 8, kNumOsc };
 
 struct Params
 {
@@ -425,7 +425,7 @@ private:
         v.lfo = 0.25;
         v.noise = 1u + (unsigned) (rnd() * 1e6f);
         v.low = low; v.high = high;
-        v.pan = nLanes > 1 ? ((float) lane / (float) (nLanes - 1) - 0.5f) * 0.5f : 0.f;   // low voices a bit left, high a bit right
+        v.pan = nLanes > 1 && prm.osc != Osc808 ? ((float) lane / (float) (nLanes - 1) - 0.5f) * 0.5f : 0.f;   // low voices a bit left, high a bit right (808: centre)
         if (continuing) { v.env = 1.f; v.age = 1.5f; }
         return best;
     }
@@ -439,7 +439,7 @@ private:
         const float ch = prm.character, br = prm.bright;
         const float f0 = 440.f * std::pow(2.f, (v.pitch - 69.f) / 12.f);
         const float dbl = prm.doubleAmt;
-        static const float oscGain[kNumOsc] = { 1.f, 1.6f, 1.9f, 0.95f, 1.1f, 1.0f, 1.2f, 1.38f };   // the 4 sounds at about the same loudness
+        static const float oscGain[kNumOsc] = { 1.f, 1.6f, 1.9f, 0.95f, 1.1f, 1.0f, 1.2f, 1.38f, 1.0f };   // the 4 sounds at about the same loudness
         const float og = oscGain[std::clamp(prm.osc, 0, kNumOsc - 1)];
 
         // per block: filters
@@ -452,7 +452,8 @@ private:
             case OscTine:    fc = f0 * (2.f + 12.f * br); break;
             case OscSine:    fc = f0 * (3.f + 14.f * br); break;
             case OscKeys:
-            case OscBowed:   fc = f0 * std::exp2(1.f + br * 9.f); break;    // BRIGHT 0.6..1 = the body as measured, lower = darker
+            case OscBowed:   fc = f0 * std::exp2(1.f + br * 9.f); break;
+            case Osc808:     fc = f0 * (3.f + 40.f * br * br); break;    // BRIGHT 0.6..1 = the body as measured, lower = darker
             default:         fc = f0 * (3.f + 10.f * br); q = 0.6f; break;
         }
         fc = std::clamp(fc, 180.f, (prm.osc == OscKeys || prm.osc == OscBowed) ? 20000.f : 16000.f);
@@ -478,7 +479,7 @@ private:
             else if (v.env < 1.f) v.env = std::min(1.f, v.env + dt / att);
 
             const float vf = std::clamp((v.age - 0.22f) / 0.6f, 0.f, 1.f);
-            const float vib = (prm.osc == OscTine || prm.osc == OscBowed) ? 0.f : (float) std::sin(v.lfo * twoPi) * prm.vibratoCents * 0.01f * vf * vf;
+            const float vib = (prm.osc == OscTine || prm.osc == OscBowed || prm.osc == Osc808) ? 0.f : (float) std::sin(v.lfo * twoPi) * prm.vibratoCents * 0.01f * vf * vf;
             v.lfo += v.lfoRate * dt;  if (v.lfo >= 1) v.lfo -= 1;
             v.drift += v.driftRate * dt; if (v.drift >= 1) v.drift -= 1;
             const float drift = (float) std::sin(v.drift * twoPi) * prm.warmth * 0.05f;   // analog drift, up to 5 cents
@@ -595,6 +596,26 @@ private:
                     l = v.lpL2; r = v.lpR2;
                     break;
                 }
+                case Osc808:
+                {
+                    // 808: a sine that starts PUNCH semitones high and drops onto the note (only a fresh note: a glide
+                    // keeps going), driven into a soft clipper (CHARACTER), off-centre for even harmonics (WARMTH). Mono.
+                    const float punch = prm.vibratoCents / 50.f * 12.f * std::exp(-v.age / 0.04f);
+                    const double f8 = inc * std::exp2(punch / 12.0);
+                    const float g = 0.25f + 15.f * std::pow(ch, 1.5f), bias = prm.warmth * 0.9f;
+                    auto shape = [&](float x) { return (std::tanh(g * (x + bias)) - std::tanh(g * bias)) / std::tanh(g); };
+                    float y = shape((float) std::sin(v.ph[0] * twoPi));
+                    v.ph[0] += f8; if (v.ph[0] >= 1) v.ph[0] -= 1;
+                    if (dbl > 0.001f)
+                    {
+                        if (v.low)  { y += shape((float) std::sin(v.ph[2] * twoPi)) * dbl * 0.8f; v.ph[2] += f8 * 0.5; if (v.ph[2] >= 1) v.ph[2] -= 1; }
+                        if (v.high) { y += shape((float) std::sin(v.ph[3] * twoPi)) * dbl * 0.4f; v.ph[3] += f8 * 2.0; if (v.ph[3] >= 1) v.ph[3] -= 1; }
+                    }
+                    l = r = y * v.env;
+                    v.lpL1 += a * (l - v.lpL1); v.lpL2 += a * (v.lpL1 - v.lpL2);
+                    l = r = v.lpL2;
+                    break;
+                }
                 case OscKeys:
                 case OscBowed:
                 {
@@ -681,6 +702,7 @@ private:
         const float g = std::pow(10.f, prm.volumeDb / 20.f) * 0.75f;
         const float toneA = 1.f - std::exp(-2.f * 3.14159265f * (17000.f - 10500.f * prm.warmth) / (float) sr);
         const float drive = 1.f + 2.5f * prm.warmth;
+        const bool tape = prm.osc != Osc808;          // the 808 has its own clipper (WARMTH = its even harmonics)
         const bool ens = prm.osc == OscStrings;
         const float depth = ens ? 0.0018f + 0.0026f * prm.character : 0.0022f;
         const float mix = ens ? 0.45f + 0.45f * prm.character : 0.36f;
@@ -707,7 +729,7 @@ private:
             if (ens) { const float c3 = tap(0, sr * (0.0115 + depth * m3)); cL = (cL + c3) * 0.7f; cR = (cR + c3) * 0.7f; }
             chorusPos = (chorusPos + 1) % chorusLen;
             float oL = inL * (1.f - mix * 0.4f) + cR * mix, oR = inR * (1.f - mix * 0.4f) + cL * mix;
-            oL = std::tanh(oL * drive) / drive; oR = std::tanh(oR * drive) / drive;
+            if (tape) { oL = std::tanh(oL * drive) / drive; oR = std::tanh(oR * drive) / drive; }
             if (trem > 0.001f)
             {
                 // the Rhodes suitcase: the sound swings left / right
