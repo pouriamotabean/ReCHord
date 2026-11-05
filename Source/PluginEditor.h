@@ -148,7 +148,9 @@ class LinkView : public juce::Component
 public:
     explicit LinkView(ReChordProcessor& p) : proc(p) {}
     ui::Bars bars;
-    std::function<void()> onSelection;
+    int page = 0;                                 // 8 bars: 0 = bars 1-4, 1 = bars 5-8
+    std::function<void()> onSelection, onPage;
+    int navHot = 0;
     juce::String learnText;                       // LEARN / drop status, shown on the bottom line
 
     // the selected glide (for the panel): t, v or -1
@@ -176,16 +178,19 @@ public:
         int playBar = -1;
         if (beat >= 0)
         {
-            const double inCycle = std::fmod(beat, rc::kBars * bars.barBeats);
+            const double inCycle = std::fmod(beat, proc.pattern.nBars * bars.barBeats);
             playBar = (int) (inCycle / bars.barBeats);
-            playX = bars.x(inCycle);
-            g.setColour(juce::Colours::white.withAlpha(0.025f));
-            g.fillRect(juce::Rectangle<float>(bars.x(playBar * bars.barBeats), top, bars.w, bottom - top));
+            if (playBar >= ws() && playBar < we())
+            {
+                playX = bx(inCycle);
+                g.setColour(juce::Colours::white.withAlpha(0.025f));
+                g.fillRect(juce::Rectangle<float>(bx(playBar * bars.barBeats), top, bars.w, bottom - top));
+            }
         }
-        // ends of the pattern: darker outside
+        // outside this page / the pattern: darker
         g.setColour(juce::Colours::black.withAlpha(0.35f));
         g.fillRect(juce::Rectangle<float>(0, 0, bars.x(0), r.getHeight()));
-        g.fillRect(juce::Rectangle<float>(bars.x(rc::kBars * bars.barBeats), 0, r.getWidth(), r.getHeight()));
+        g.fillRect(juce::Rectangle<float>(bx(we() * bars.barBeats), 0, r.getWidth(), r.getHeight()));
 
         // octave lines
         for (int m = (lo / 12) * 12; m <= hi; m += 12)
@@ -198,21 +203,31 @@ public:
             g.drawText(rc::noteName(m), juce::Rectangle<float>(4.f, y - 7.f, 32.f, 14.f), juce::Justification::centredRight);
         }
         // bar lines + numbers, half-bar lines
-        for (int b = 0; b <= rc::kBars; ++b)
+        for (int b = ws(); b <= we(); ++b)
         {
-            const float x = bars.x(b * bars.barBeats);
+            const float x = bx(b * bars.barBeats);
             g.setColour(line); g.drawVerticalLine((int) x, top - 6.f, bottom + 4.f);
-            if (b < rc::kBars)
+            if (b < we())
             {
-                if (proc.pattern.split[b]) { g.setColour(line.withAlpha(0.5f)); g.drawVerticalLine((int) bars.x((b + 0.5) * bars.barBeats), top + 4.f, bottom); }
+                if (proc.pattern.split[b]) { g.setColour(line.withAlpha(0.5f)); g.drawVerticalLine((int) bx((b + 0.5) * bars.barBeats), top + 4.f, bottom); }
                 g.setColour(b == playBar ? orange : dim);
                 g.setFont(mono(9.f, b == playBar));
                 g.drawText(juce::String(b + 1), juce::Rectangle<float>(x + 7.f, 8.f, 30.f, 14.f), juce::Justification::centredLeft);
             }
         }
-        g.setFont(mono(8.f, true)); g.setColour(faint);
-        g.drawText(endLabel(-1), juce::Rectangle<float>(bars.ghostLeft() - 40.f, 8.f, 80.f, 14.f), juce::Justification::centred);
-        g.drawText(endLabel(-2), juce::Rectangle<float>(bars.ghostRight() - 40.f, 8.f, 80.f, 14.f), juce::Justification::centred);
+        for (int side : { -1, -2 })
+        {
+            const bool nav = side == -1 ? page > 0 : we() < proc.pattern.nBars;      // the other page of an 8-bar pattern
+            const auto rr = navRect(side);
+            if (nav)
+            {
+                g.setColour(navHot == side ? chipOn : chip2); g.fillRoundedRectangle(rr, 7.f);
+                g.setColour(navHot == side ? white : orange);
+            }
+            else g.setColour(faint);
+            g.setFont(mono(8.f, true));
+            g.drawText(nav ? (side == -1 ? U("‹ BARS 1-4") : U("BARS 5-8 ›")) : endLabel(side), rr, juce::Justification::centred);
+        }
 
         // the paths
         hits.clear(); handles.clear(); handlePts.clear();
@@ -233,8 +248,9 @@ public:
         for (int c = -1; c <= n; ++c)
         {
             if (!colShown(c)) continue;
-            const bool ghost = c < 0 || c >= n;
-            const bool mirror = ghost && s.loop();
+            const bool ghost = c == firstCol() - 1 || c == endCol();
+            const bool mirror = ghost && (c < 0 || c >= n) && s.loop();
+            const bool neighbour = ghost && c >= 0 && c < n;              // a real chord of the other page
             for (int v = 0; v < N; ++v)
             {
                 float y = yOf((float) (colPitch(c, v) + tr));
@@ -246,7 +262,7 @@ public:
                 const float alpha = mirror ? 0.3f : ghost ? 0.7f : 1.f;
                 if (sel || tgt) glow(g, juce::Rectangle<float>(rad * 2, rad * 2).withCentre(cc), orange, 0.9f, 10.f);
                 g.setColour((sel || tgt ? orange : white).withAlpha(alpha));
-                if (ghost && !mirror) { g.drawEllipse(juce::Rectangle<float>(rad * 2 - 2, rad * 2 - 2).withCentre(cc), 2.f); }
+                if (ghost && !mirror && !neighbour) { g.drawEllipse(juce::Rectangle<float>(rad * 2 - 2, rad * 2 - 2).withCentre(cc), 2.f); }
                 else g.fillEllipse(juce::Rectangle<float>(rad * 2, rad * 2).withCentre(cc));
                 if (hoverDot.first == c && hoverDot.second == v && !sel)
                 { g.setColour(orange.withAlpha(alpha)); g.drawEllipse(juce::Rectangle<float>(rad * 2 + 5, rad * 2 + 5).withCentre(cc), 1.4f); }
@@ -282,6 +298,9 @@ public:
 
     void mouseMove(const juce::MouseEvent& e) override
     {
+        int nh = 0;
+        for (int side : { -1, -2 }) if (navRect(side).contains(e.position)) nh = side;
+        if (nh != navHot) { navHot = nh; repaint(); }
         auto h = handleAt(e.position);
         auto d = h.kind < 0 ? dotAt(e.position) : std::make_pair(-99, -1);
         auto l = (h.kind < 0 && d.first == -99) ? linkAt(e.position) : Hit2 {};
@@ -298,8 +317,17 @@ public:
     void mouseDown(const juce::MouseEvent& e) override
     {
         dragKind = None; noteMode = 0; dropCol = -99; dropV = -1; moved = false;
+        for (int side : { -1, -2 })
+            if (navRect(side).contains(e.position) && (side == -1 ? page > 0 : we() < proc.pattern.nBars))
+            {
+                page = side == -1 ? page - 1 : page + 1;
+                setSel(-2, -1);
+                if (onPage) onPage();
+                repaint();
+                return;
+            }
         // the bar numbers: play from here
-        if (e.position.y < top - 8.f && e.position.x >= bars.x(0) && e.position.x <= bars.x(rc::kBars * bars.barBeats))
+        if (e.position.y < top - 8.f && e.position.x >= bars.x(0) && e.position.x <= bx(we() * bars.barBeats))
         {
             seekFrom(e.position.x);
             dragKind = Seek;
@@ -396,7 +424,7 @@ private:
     enum { None, DragNote, DragHandle, ClickLink, Seek };
     void seekFrom(float x)
     {
-        const double beat = juce::jlimit(0.0, rc::kBars * bars.barBeats - 0.01, (double) (x - bars.x(0)) / bars.w * bars.barBeats);
+        const double beat = juce::jlimit(0.0, proc.pattern.nBars * bars.barBeats - 0.01, ws() * bars.barBeats + (double) (x - bars.x(0)) / bars.w * bars.barBeats);
         auto* l = proc.apvts.getParameter("listen");
         if (l->getValue() < 0.5f) { l->beginChangeGesture(); l->setValueNotifyingHost(1.f); l->endChangeGesture(); }
         proc.seekTo(beat);
@@ -421,9 +449,18 @@ private:
     std::pair<int, int> hoverDot { -99, -1 };
 
     // ---- what is shown ----
+    // the page: bars ws()..we()-1; the columns firstCol()..endCol()-1 are its chords, firstCol()-1 and endCol() the ghosts
+    int ws() const { return proc.pattern.nBars > rc::kBars ? page * rc::kBars : 0; }
+    int we() const { return std::min(proc.pattern.nBars, ws() + rc::kBars); }
+    int firstCol() const { const auto& s = proc.score; int i = 0; while (i < s.nSlots && s.start[i] < (float) ws() - 0.01f) ++i; return i; }
+    int endCol() const { const auto& s = proc.score; int i = 0; while (i < s.nSlots && s.start[i] < (float) we() - 0.01f) ++i; return i; }
+    float bx(double beat) const { return bars.x(beat - ws() * bars.barBeats); }
+    juce::Rectangle<float> navRect(int side) const { return { (side == -1 ? bars.ghostLeft() : bars.ghostRight()) - 42.f, 6.f, 84.f, 17.f }; }
     bool colShown(int c) const
     {
         const auto& s = proc.score;
+        const int a = firstCol(), b = endCol();
+        if (c < a - 1 || c > b) return false;
         if (c < 0) return s.loop() || s.entryMode == rc::ToChord;
         if (c >= s.nSlots) return s.exitMode != rc::None;
         return true;
@@ -437,25 +474,25 @@ private:
     float colX(int c) const
     {
         const auto& s = proc.score;
-        if (c < 0) return bars.ghostLeft();
-        if (c >= s.nSlots) return bars.ghostRight();
-        return bars.x((s.start[c] + s.start[c + 1]) * 0.5 * bars.barBeats);
+        if (c < firstCol()) return bars.ghostLeft();
+        if (c >= endCol()) return bars.ghostRight();
+        return bx((s.start[c] + s.start[c + 1]) * 0.5 * bars.barBeats);
     }
     int transFrom(int col) const { const auto& s = proc.score; return col < 0 ? (s.loop() ? s.nSlots - 1 : -1) : col; }
     std::vector<Trans> transitions() const
     {
         const auto& s = proc.score;
         std::vector<Trans> t;
-        if (colShown(-1)) t.push_back({ transFrom(-1), -1, 0 });
-        for (int i = 0; i < s.nSlots - 1; ++i) t.push_back({ i, i, i + 1 });
-        if (colShown(s.nSlots)) t.push_back({ s.nSlots - 1, s.nSlots - 1, s.nSlots });
+        (void) s;
+        for (int c = firstCol() - 1; c < endCol(); ++c)
+            if (colShown(c) && colShown(c + 1)) t.push_back({ transFrom(c), c, c + 1 });
         return t;
     }
     juce::String endLabel(int which) const
     {
         const auto& s = proc.score;
         const auto& p = proc.pattern;
-        if (s.loop()) return which == -1 ? "FROM 4" : "TO 1";
+        if (s.loop()) return which == -1 ? "FROM " + juce::String(s.nBars) : juce::String("TO 1");
         const int m = which == -1 ? s.entryMode : s.exitMode;
         if (m == rc::None) return which == -1 ? "START" : "END";
         const auto& c = which == -1 ? p.entry : p.exit;
@@ -488,8 +525,8 @@ private:
         const auto& l = s.linkAt(tr0.t, v);
         const float x0 = colX(tr0.from), x1 = colX(tr0.to);
         const float y0 = yOf((float) (colPitch(tr0.from, v) + tp)), y1 = yOf((float) (colPitch(tr0.to, l.to) + tp));
-        const double bBeat = tr0.to >= s.nSlots ? rc::kBars * bars.barBeats : tr0.to == 0 ? 0.0 : s.start[tr0.to] * bars.barBeats;
-        const float bx = bars.x(bBeat);
+        const double bBeat = tr0.to >= s.nSlots ? s.nBars * bars.barBeats : tr0.to == 0 ? 0.0 : s.start[tr0.to] * bars.barBeats;
+        const float bx = this->bx(bBeat);
         const float pxBeat = bars.w / (float) bars.barBeats;
         const bool sel = selLinkT == tr0.t && selLinkV == v;
         const bool hot = hoverT == tr0.t && hoverV == v;
@@ -659,6 +696,7 @@ class ChordStrip : public juce::Component
 public:
     explicit ChordStrip(ReChordProcessor& p) : proc(p) {}
     ui::Bars bars;
+    int page = 0;
     int open = -99;
     std::function<void(int)> onClick;      // key: 0..7, -1 before, -2 after
 
@@ -666,7 +704,7 @@ public:
     {
         using namespace ui;
         const int tp = proc.transpose();
-        for (int b = 0; b < rc::kBars; ++b)
+        for (int b = ws(); b < we(); ++b)
         {
             const bool sp = proc.pattern.split[b];
             for (int h = 0; h < (sp ? 2 : 1); ++h)
@@ -726,16 +764,18 @@ private:
         if (key == -2) return { bars.ghostRight() - 32.f, 10.f, 64.f, h - 10.f };
         const int b = key / 2;
         const double bb = bars.barBeats;
-        if (!proc.pattern.split[b]) return { bars.x(b * bb) + 5.f, 2.f, bars.w - 10.f, h };
+        if (!proc.pattern.split[b]) return { bars.x((b - ws()) * bb) + 5.f, 2.f, bars.w - 10.f, h };
         const float half = bars.w * 0.5f;
-        return { bars.x(b * bb) + 5.f + (key % 2) * half, 2.f, half - 10.f + (key % 2 ? 0.f : 5.f), h };
+        return { bars.x((b - ws()) * bb) + 5.f + (key % 2) * half, 2.f, half - 10.f + (key % 2 ? 0.f : 5.f), h };
     }
-    juce::Rectangle<float> splitCell(int b) const { return { bars.x((b + 1) * bars.barBeats) - 26.f, 4.f, 18.f, 16.f }; }
+    int ws() const { return proc.pattern.nBars > rc::kBars ? page * rc::kBars : 0; }
+    int we() const { return std::min(proc.pattern.nBars, ws() + rc::kBars); }
+    juce::Rectangle<float> splitCell(int b) const { return { bars.x((b + 1 - ws()) * bars.barBeats) - 26.f, 4.f, 18.f, 16.f }; }
     int at(juce::Point<float> p) const
     {
-        for (int b = 0; b < rc::kBars; ++b) if (splitCell(b).expanded(2.f).contains(p)) return 100 + b;
+        for (int b = ws(); b < we(); ++b) if (splitCell(b).expanded(2.f).contains(p)) return 100 + b;
         for (int k : { -1, -2 }) if (cell(k).contains(p)) return k;
-        for (int b = 0; b < rc::kBars; ++b)
+        for (int b = ws(); b < we(); ++b)
             for (int h = 0; h < (proc.pattern.split[b] ? 2 : 1); ++h) if (cell(b * 2 + h).contains(p)) return b * 2 + h;
         return -99;
     }
@@ -896,7 +936,7 @@ public:
         slider.onValueChange = [this] { repaint(); };
         slider.setDoubleClickReturnValue(true, (double) param->convertFrom0to1(param->getDefaultValue()));
     }
-    void resized() override { const int d = std::min(50, getWidth() - 14); slider.setBounds(getLocalBounds().withTrimmedBottom(30).withSizeKeepingCentre(d, d)); }
+    void resized() override { const int d = std::min(56, getWidth() - 14); slider.setBounds(getLocalBounds().withTrimmedBottom(30).withSizeKeepingCentre(d, d)); }
     void paint(juce::Graphics& g) override
     {
         using namespace ui;
@@ -1106,7 +1146,7 @@ public:
         g.setFont(inter(13.f, 600));
         g.drawText(busy ? U("rendering…") : juce::String("DRAG WAV"), juce::Rectangle<float>(r.getX() + 36.f, r.getY() + 5.f, r.getWidth() - 40.f, 18.f), juce::Justification::centredLeft);
         g.setColour(juce::Colours::white.withAlpha(0.75f)); g.setFont(mono(8.5f));
-        g.drawText(ui::U("4 BARS · ") + juce::String(juce::roundToInt(proc.hostBpm.load())) + " BPM",
+        g.drawText(juce::String(proc.pattern.nBars) + ui::U(" BARS · ") + juce::String(juce::roundToInt(proc.hostBpm.load())) + " BPM",
                    juce::Rectangle<float>(r.getX() + 36.f, r.getY() + 22.f, r.getWidth() - 40.f, 14.f), juce::Justification::centredLeft);
     }
     void mouseEnter(const juce::MouseEvent&) override { hot = true; repaint(); }
@@ -1137,9 +1177,77 @@ private:
     }
 };
 
+
+// -----------------------------------------------------------------------------------------------------
+// the knob panel: SOUND / GLIDE / KEY, one page at a time
+// -----------------------------------------------------------------------------------------------------
+class PanelTabs : public juce::Component
+{
+public:
+    int current = 0;
+    std::function<void(int)> onChange;
+    void paint(juce::Graphics& g) override
+    {
+        using namespace ui;
+        const char* names[] = { "SOUND", "GLIDE", "KEY" };
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto r = cell(i);
+            if (current == i) { g.setColour(chipOn); g.fillRoundedRectangle(r, 9.f); g.setColour(orange); g.fillRoundedRectangle(r.getX() + 3.f, r.getY() + 9.f, 2.5f, r.getHeight() - 18.f, 1.2f); }
+            else if (hover == i) { g.setColour(chip2); g.fillRoundedRectangle(r, 9.f); }
+            g.setColour(current == i ? white : soft); g.setFont(mono(10.f, true));
+            g.drawText(names[i], r.withTrimmedLeft(16.f), juce::Justification::centredLeft);
+        }
+    }
+    void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < 3; ++i) if (cell(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        for (int i = 0; i < 3; ++i) if (cell(i).contains(e.position)) { current = i; repaint(); if (onChange) onChange(i); }
+    }
+private:
+    int hover = -1;
+    juce::Rectangle<float> cell(int i) const { const float h = ((float) getHeight() - 8.f) / 3.f; return { 4.f, 4.f + i * h, (float) getWidth() - 8.f, h - 4.f }; }
+};
+
+// pattern length: 4 or 8 bars
+class BarsSwitch : public juce::Component
+{
+public:
+    explicit BarsSwitch(ReChordProcessor& p) : proc(p) {}
+    std::function<void()> onChange;
+    void paint(juce::Graphics& g) override
+    {
+        using namespace ui;
+        for (int i = 0; i < 2; ++i)
+        {
+            const auto r = seg(i);
+            const bool on = proc.pattern.nBars == (i == 0 ? 4 : 8);
+            g.setColour(on ? chipOn : hover == i ? chip2.brighter(0.05f) : chip2);
+            g.fillRoundedRectangle(r, 9.f);
+            if (on) { g.setColour(orange); g.fillEllipse(r.getX() + 12.f, r.getCentreY() - 3.f, 6.f, 6.f); }
+            g.setColour(on ? white : soft); g.setFont(mono(9.5f, true));
+            g.drawText(i == 0 ? "4 BARS" : "8 BARS", r.withTrimmedLeft(on ? 14.f : 0.f), juce::Justification::centred);
+        }
+        g.setColour(label); g.setFont(mono(8.5f, true));
+        g.drawText("PATTERN", juce::Rectangle<float>(0, (float) getHeight() - 30.f, (float) getWidth(), 13.f), juce::Justification::centred);
+    }
+    void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < 2; ++i) if (seg(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        for (int i = 0; i < 2; ++i) if (seg(i).contains(e.position)) { proc.setBars(i == 0 ? 4 : 8); repaint(); if (onChange) onChange(); }
+    }
+private:
+    ReChordProcessor& proc;
+    int hover = -1;
+    juce::Rectangle<float> seg(int i) const { return { 4.f, 8.f + i * 26.f, (float) getWidth() - 8.f, 22.f }; }
+};
+
 // -----------------------------------------------------------------------------------------------------
 // the device (design size 960 x 600) and the editor that scales it
 // -----------------------------------------------------------------------------------------------------
+
 
 // -----------------------------------------------------------------------------------------------------
 // the device (design size 960 x 600) and the editor that scales it
@@ -1168,13 +1276,19 @@ public:
           kChar(p, "character", "CHARACTER"), kAttack(p, "attack", "ATTACK"), kBright(p, "bright", "BRIGHT"), kVib(p, "vibrato", "VIBRATO"),
           kRel(p, "release", "RELEASE"), kWarm(p, "warmth", "WARMTH"), kSpace(p, "space", "SPACE"),
           kSpread(p, "spread", "SPREAD"), kDouble(p, "double", "DOUBLE"),
-          kLive(p, "liveGlide", "KEYBOARD"), kTrans(p, "transpose", "TRANSPOSE", true), kOct(p, "octave", "OCTAVE", true), kVoices(p, "voices", "VOICES"), kVol(p, "volume", "VOLUME")
+          kLive(p, "liveGlide", "KEYBOARD"), kTrans(p, "transpose", "TRANSPOSE", true), kOct(p, "octave", "OCTAVE", true), kVoices(p, "voices", "VOICES"), kVol(p, "volume", "VOLUME"),
+          barsSw(p)
     {
         addAndMakeVisible(view);
         addAndMakeVisible(strip);
         addChildComponent(picker);
         addAndMakeVisible(drag);
         addAndMakeVisible(mode);
+        addAndMakeVisible(tabs);
+        addAndMakeVisible(barsSw);
+        tabs.onChange = [this](int) { showTab(); };
+        barsSw.onChange = [this] { view.page = strip.page = 0; closePicker(); view.setSel(-2, -1); refresh(); };
+        view.onPage = [this] { strip.page = view.page; closePicker(); strip.repaint(); };
         addAndMakeVisible(type);
         addAndMakeVisible(presetBox);
         addChildComponent(presets);
@@ -1266,20 +1380,18 @@ public:
         g.setColour(orange); g.fillEllipse(124.f, 21.f, 6.f, 6.f);
         g.setColour(faint); g.setFont(mono(7.5f));
         g.drawText(U("BY POURIA MOTABEAN · v" RECHORD_VERSION), juce::Rectangle<float>(29.f, 40.f, 200.f, 12.f), juce::Justification::centredLeft);
-        g.setColour(faint); g.setFont(mono(8.f, true));
-        auto group = [&](const char* t, juce::Component& first, juce::Component& last)
+        // the knob panel
+        const auto panel = juce::Rectangle<float>(24.f, 462.f, 912.f, 124.f);
+        shadow(g, panel, 14.f, 0.6f, 4.f, 6.f);
+        g.setColour(card); g.fillRoundedRectangle(panel, 14.f);
+        g.setColour(juce::Colours::white.withAlpha(0.04f)); g.drawRoundedRectangle(panel.reduced(0.5f), 14.f, 1.f);
+        g.setColour(line); g.drawVerticalLine(140, panel.getY() + 12.f, panel.getBottom() - 12.f);
+        if (tabs.current == 1)
         {
-            const float x0 = (float) first.getX() + 8.f, x1 = (float) last.getRight() - 8.f, y = (float) first.getY() - 10.f;
-            g.drawText(t, juce::Rectangle<float>(x0, y - 7.f, x1 - x0, 14.f), juce::Justification::centred);
-            const float tw = 70.f;
-            g.setColour(line);
-            g.drawHorizontalLine((int) y, x0, (x0 + x1) * 0.5f - tw * 0.5f);
-            g.drawHorizontalLine((int) y, (x0 + x1) * 0.5f + tw * 0.5f, x1);
-            g.setColour(faint);
-        };
-        group("SOUND", kChar, kSpace);
-        group("GLIDE", mode, kLive);
-        group("KEY", kTrans, kVol);
+            g.setColour(faint); g.setFont(mono(8.5f));
+            g.drawText("each glide's start / end / curve: the handles on the display", juce::Rectangle<float>(540.f, 490.f, 380.f, 14.f), juce::Justification::centredLeft);
+            g.drawText("KEYBOARD = how long a played chord glides to the next", juce::Rectangle<float>(540.f, 510.f, 380.f, 14.f), juce::Justification::centredLeft);
+        }
     }
     void resized() override
     {
@@ -1302,14 +1414,8 @@ public:
         allB.setBounds(24 + 912 - 150, 72 + 300 - 26, 56, 20);
         resetB.setBounds(24 + 912 - 88, 72 + 300 - 26, 72, 20);
 
-        float x = 24.f;
-        const int y = 482;
-        auto place = [&](juce::Component& c, float w) { c.setBounds((int) x, y, (int) w, 92); x += w; };
-        place(kChar, 56); place(kAttack, 56); place(kBright, 56); place(kVib, 56); place(kRel, 56); place(kWarm, 56); place(kSpace, 56);
-        x += 12.f;
-        place(mode, 88); place(kSpread, 56); place(kDouble, 56); place(kLive, 56);
-        x += 12.f;
-        place(kTrans, 56); place(kOct, 56); place(kVoices, 56); place(kVol, 56);
+        tabs.setBounds(30, 470, 104, 108);
+        showTab();
     }
     void refresh()
     {
@@ -1322,9 +1428,9 @@ public:
         drag.repaint();
         smartB.setToggleState(!proc.score.edited, juce::dontSendNotification);
         learnB.setToggleState(proc.learnState.load() != 0, juce::dontSendNotification);
-        view.learnText = proc.learnState.load() == 1 ? juce::String("LEARN: waiting for Cubase to play - the next bar line starts 4 bars")
-                       : proc.learnState.load() == 2 ? "LEARN: listening, bar " + juce::String(juce::jlimit(1, 4, (int) proc.learnPos.load() + 1)) + " of 4"
-                       : dropping ? juce::String("DROP: the chords of the first 4 bars of this MIDI file") : juce::String();
+        view.learnText = proc.learnState.load() == 1 ? "LEARN: waiting for Cubase to play - the next bar line starts " + juce::String(proc.pattern.nBars) + " bars"
+                       : proc.learnState.load() == 2 ? "LEARN: listening, bar " + juce::String(juce::jlimit(1, proc.pattern.nBars, (int) proc.learnPos.load() + 1)) + " of " + juce::String(proc.pattern.nBars)
+                       : dropping ? "DROP: the chords of the first " + juce::String(proc.pattern.nBars) + " bars of this MIDI file" : juce::String();
         if (view.hasSelLink() && (view.selectedV() >= proc.score.nVoices || view.selectedT() >= proc.score.nSlots)) view.setSel(-2, -1);
     }
 
@@ -1340,6 +1446,27 @@ private:
     PresetBox presetBox;
     PresetPanel presets;
     Knob kChar, kAttack, kBright, kVib, kRel, kWarm, kSpace, kSpread, kDouble, kLive, kTrans, kOct, kVoices, kVol;
+    BarsSwitch barsSw;
+    PanelTabs tabs;
+    // the knobs of the open tab, side by side
+    void showTab()
+    {
+        std::vector<juce::Component*> sound { &kChar, &kAttack, &kBright, &kVib, &kRel, &kWarm, &kSpace, &kDouble },
+                                      glide { &mode, &kSpread, &kLive },
+                                      key { &kTrans, &kOct, &kVoices, &kVol, &barsSw };
+        for (auto* c : sound) c->setVisible(tabs.current == 0);
+        for (auto* c : glide) c->setVisible(tabs.current == 1);
+        for (auto* c : key) c->setVisible(tabs.current == 2);
+        auto& list = tabs.current == 0 ? sound : tabs.current == 1 ? glide : key;
+        float x = 150.f;
+        for (auto* c : list)
+        {
+            const float w = (c == &mode || c == &barsSw) ? 130.f : 97.f;
+            c->setBounds((int) x, 478, (int) w, 100);
+            x += w;
+        }
+        repaint();
+    }
     juce::TextButton listen { "LISTEN" }, smartB { "SMART" }, learnB { "LEARN" }, allB { "ALL" }, resetB { "RESET" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> listenAtt;
     std::vector<Knob*> knobs() { return { &kChar, &kAttack, &kBright, &kVib, &kRel, &kWarm, &kSpace, &kSpread, &kDouble, &kLive, &kTrans, &kOct, &kVoices, &kVol }; }

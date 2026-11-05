@@ -58,6 +58,25 @@ int main(int argc, char** argv)
         snap("e_midi_octave.png");
         proc.learnState = 0;
     }
+    // 8 bars, second page
+    proc.setBars(8);
+    proc.setChord(8, 0, rc::Maj);
+    view->page = 1; if (view->onPage) view->onPage();
+    view->setSel(4, 1);
+    snap("f_8bars_page2.png");
+    view->page = 0; if (view->onPage) view->onPage();
+    snap("g_8bars_page1.png");
+    if (auto* tabs = findChild<PanelTabs>(ed.get()))
+    {
+        tabs->current = 1; tabs->onChange(1); snap("h_tab_glide.png");
+        tabs->current = 2; tabs->onChange(2); snap("i_tab_key.png");
+        tabs->current = 0; tabs->onChange(0);
+    }
+    std::printf("8 bars: slots %d, render ", proc.score.nSlots);
+    {
+        auto f8 = proc.renderWav();
+        std::printf("%lld bytes\n", (long long) f8.getSize());
+    }
     juce::MemoryBlock mb; proc.getStateInformation(mb);
     ReChordProcessor p2; p2.setStateInformation(mb.getData(), (int) mb.getSize());
     std::printf("state: preset %d osc %.0f character %.2f\n", p2.presetIndex, p2.apvts.getRawParameterValue("osc")->load(), p2.apvts.getRawParameterValue("character")->load());

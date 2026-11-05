@@ -138,6 +138,22 @@ void ReChordProcessor::setChord(int key, int root, int quality)
     smart();
 }
 
+void ReChordProcessor::setBars(int n)
+{
+    n = n == 8 ? 8 : 4;
+    if (n == pattern.nBars) return;
+    if (n == 8 && !eightUsed)
+        for (int b = 0; b < rc::kBars; ++b)    // the first time: bars 5-8 start as a copy of 1-4
+        {
+            pattern.split[b + 4] = pattern.split[b];
+            pattern.chord[(b + 4) * 2] = pattern.chord[b * 2];
+            pattern.chord[(b + 4) * 2 + 1] = pattern.chord[b * 2 + 1];
+        }
+    if (n == 8) eightUsed = true;
+    pattern.nBars = n;
+    smart();
+}
+
 void ReChordProcessor::setSplit(int bar, bool on)
 {
     pattern.split[bar] = on;
@@ -307,7 +323,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     }
     else if (ls == 2)
     {
-        if (!hostPlaying || ppq >= learnStart + rc::kBars * learnBarBeats) learnState = 3;
+        if (!hostPlaying || ppq >= learnStart + pattern.nBars * learnBarBeats) learnState = 3;
         learnPos = hostPlaying ? (ppq - learnStart) / learnBarBeats : -1.0;
     }
 
@@ -321,7 +337,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     {
         playing = true;
         beat = freeBeat;
-        freeBeat = std::fmod(freeBeat + n * bpm / 60.0 / getSampleRate(), rc::kBars * barBeats * 12.0);
+        freeBeat = std::fmod(freeBeat + n * bpm / 60.0 / getSampleRate(), rc::kMaxBars * barBeats * 12.0);
     }
     else freeBeat = 0;
 
@@ -370,7 +386,7 @@ void ReChordProcessor::finishLearn()
         if (e.on) on[e.key] = e.beat;
         else if (on.count(e.key)) { notes.push_back({ on[e.key] - learnStart, e.beat - learnStart, e.key }); on.erase(e.key); }
     }
-    for (auto& kv : on) notes.push_back({ kv.second - learnStart, rc::kBars * learnBarBeats, kv.first });
+    for (auto& kv : on) notes.push_back({ kv.second - learnStart, pattern.nBars * learnBarBeats, kv.first });
     const int firstBar = (int) std::llround(learnStart / learnBarBeats);
     learnState = 0;
     learnPos = -1.0;
@@ -421,9 +437,10 @@ bool ReChordProcessor::loadMidiFile(const juce::File& f)
 bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeats, int firstBar)
 {
     struct Half { int mask = 0, bass = -1; std::vector<int> keys; };
-    Half half[rc::kBars][2];
+    const int NB = pattern.nBars;
+    Half half[rc::kMaxBars][2];
     bool any = false;
-    for (int b = 0; b < rc::kBars; ++b)
+    for (int b = 0; b < NB; ++b)
         for (int h = 0; h < 2; ++h)
         {
             const double w0 = b * barBeats + h * barBeats * 0.5, w1 = w0 + barBeats * 0.5;
@@ -440,11 +457,11 @@ bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeat
         }
     if (!any) return false;
     // empty halves keep the chord before them
-    for (int b = 0; b < rc::kBars; ++b)
+    for (int b = 0; b < NB; ++b)
         for (int h = 0; h < 2; ++h)
             if (half[b][h].keys.empty())
             {
-                const int pb = h == 1 ? b : (b + rc::kBars - 1) % rc::kBars, ph = h == 1 ? 0 : 1;
+                const int pb = h == 1 ? b : (b + NB - 1) % NB, ph = h == 1 ? 0 : 1;
                 if (!half[pb][ph].keys.empty()) half[b][h] = half[pb][ph];
                 else if (!half[b][1 - h].keys.empty()) half[b][h] = half[b][1 - h];
             }
@@ -452,9 +469,9 @@ bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeat
     rc::Pattern p = pattern;
     p.entryMode = p.exitMode = rc::Loop;
     std::vector<std::vector<int>> keysPerSlot;
-    for (int b = 0; b < rc::kBars; ++b)
+    for (int b = 0; b < NB; ++b)
     {
-        const int pb = ((firstBar + b) % rc::kBars + rc::kBars) % rc::kBars;
+        const int pb = ((firstBar + b) % NB + NB) % NB;
         const auto c0 = rc::identifyChord(half[b][0].mask, half[b][0].bass), c1 = rc::identifyChord(half[b][1].mask, half[b][1].bass);
         p.split[pb] = !(c0.root == c1.root && c0.quality == c1.quality) && !half[b][1].keys.empty();
         p.chord[pb * 2] = c0;
@@ -470,7 +487,7 @@ bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeat
     for (int i = 0; i < ns; ++i)
     {
         const int pb = key[i] / 2, hh = key[i] % 2;
-        const int b = ((pb - firstBar) % rc::kBars + rc::kBars) % rc::kBars;
+        const int b = ((pb - firstBar) % NB + NB) % NB;
         played[(size_t) i] = half[b][hh].keys;
         const int c = (int) played[(size_t) i].size();
         if (count < 0) count = c; else if (c != count) same = false;
@@ -515,6 +532,7 @@ void ReChordProcessor::getStateInformation(juce::MemoryBlock& dest)
     for (bool b : pattern.split) split << (b ? 1 : 0) << " ";
     m.setProperty("chords", chords.trim(), nullptr);
     m.setProperty("split", split.trim(), nullptr);
+    m.setProperty("bars", pattern.nBars, nullptr);
     m.setProperty("ends", juce::String(pattern.entryMode) + " " + juce::String(pattern.exitMode) + " " + juce::String(pattern.entry.root) + ":" + juce::String(pattern.entry.quality)
                           + " " + juce::String(pattern.exit.root) + ":" + juce::String(pattern.exit.quality), nullptr);
     m.setProperty("nVoices", score.nVoices, nullptr);
@@ -550,8 +568,10 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
     ends.addTokens(m.getProperty("ends").toString(), " ", "");
     auto chordOf = [](const juce::String& s) { return rc::Chord { s.upToFirstOccurrenceOf(":", false, false).getIntValue() % 12,
                                                                   juce::jlimit(0, rc::kNumQualities - 1, s.fromFirstOccurrenceOf(":", false, false).getIntValue()) }; };
-    if (ch.size() == rc::kBars * 2) for (int i = 0; i < ch.size(); ++i) pattern.chord[i] = chordOf(ch[i]);
-    if (sp.size() == rc::kBars) for (int i = 0; i < rc::kBars; ++i) pattern.split[i] = sp[i].getIntValue() != 0;
+    if (ch.size() == rc::kBars * 2 || ch.size() == rc::kMaxBars * 2) for (int i = 0; i < ch.size(); ++i) pattern.chord[i] = chordOf(ch[i]);
+    if (sp.size() == rc::kBars || sp.size() == rc::kMaxBars) for (int i = 0; i < sp.size(); ++i) pattern.split[i] = sp[i].getIntValue() != 0;
+    pattern.nBars = (int) m.getProperty("bars", 4) == 8 ? 8 : 4;
+    eightUsed = ch.size() == rc::kMaxBars * 2;
     if (ends.size() == 4)
     {
         pattern.entryMode = juce::jlimit(0, 2, ends[0].getIntValue());

@@ -9,8 +9,9 @@
 
 namespace rc
 {
-constexpr int kBars = 4;        // the pattern is 4 bars long
-constexpr int kMaxSlots = 8;    // each bar can hold 1 chord or 2 half-bar chords
+constexpr int kBars = 4;        // a page of the display / the shorter pattern
+constexpr int kMaxBars = 8;     // a pattern is 4 or 8 bars
+constexpr int kMaxSlots = 16;   // each bar can hold 1 chord or 2 half-bar chords
 constexpr int kMaxVoices = 4;
 
 enum Quality { Maj = 0, Min, Dom7, Maj7, Min7, Sus2, Sus4, Dim, kNumQualities };
@@ -54,8 +55,10 @@ inline std::vector<int> chordTones(const Chord& c, int n)
 // ---------------- what the user writes ----------------
 struct Pattern
 {
-    bool split[kBars] {};                                       // bar b holds two half-bar chords
-    Chord chord[kBars * 2] = { { 9, Min }, { 9, Min }, { 7, Maj }, { 7, Maj }, { 5, Maj }, { 5, Maj }, { 4, Min }, { 4, Min } };
+    int nBars = 4;
+    bool split[kMaxBars] {};                                    // bar b holds two half-bar chords
+    Chord chord[kMaxBars * 2] = { { 9, Min }, { 9, Min }, { 7, Maj }, { 7, Maj }, { 5, Maj }, { 5, Maj }, { 4, Min }, { 4, Min },
+                                  { 9, Min }, { 9, Min }, { 7, Maj }, { 7, Maj }, { 5, Maj }, { 5, Maj }, { 4, Min }, { 4, Min } };
     int entryMode = Loop, exitMode = Loop;
     Chord entry { 4, Min }, exit { 2, Min };
 
@@ -63,12 +66,12 @@ struct Pattern
     int slots(int* key, float* start) const
     {
         int n = 0;
-        for (int b = 0; b < kBars; ++b)
+        for (int b = 0; b < nBars; ++b)
         {
             key[n] = b * 2; start[n] = (float) b; ++n;
             if (split[b]) { key[n] = b * 2 + 1; start[n] = b + 0.5f; ++n; }
         }
-        start[n] = (float) kBars;
+        start[n] = (float) nBars;
         return n;
     }
 };
@@ -85,7 +88,7 @@ struct Link
 
 struct Score
 {
-    int nVoices = 3, nSlots = 4;
+    int nVoices = 3, nSlots = 4, nBars = 4;
     float start[kMaxSlots + 1] = { 0, 1, 2, 3, 4 };    // in bars
     int key[kMaxSlots] = { 0, 2, 4, 6 };                // which Pattern chord each slot plays
     int pitch[kMaxSlots][kMaxVoices] {};
@@ -213,6 +216,7 @@ inline void buildScore(Score& s, const Pattern& p, int n, int octave)
     s = fresh;
     s.nVoices = n;
     s.nSlots = p.slots(s.key, s.start);
+    s.nBars = p.nBars;
     s.exitMode = p.exitMode;
     s.entryMode = p.exitMode == Loop ? Loop : p.entryMode;
     const int centre = (n == 1 ? 31 : n == 2 ? 38 : 64) + 12 * octave;   // 1-2 voices: a bass line, down where an 808 sits
@@ -322,10 +326,48 @@ inline int laneSlot(const Score& s, int lane, long long c, int i)
 }
 
 // where lane k is at beat position u (already shifted by the lane's spread delay)
-inline LaneState evalLane(const Score& s, int lane, double u, double barBeats, int mode)
+// where every lane is in every slot, and how far back its note began - worked out once per score, so playing
+// costs the same however long the pattern is
+struct LaneCache
+{
+    int P = 0;                                         // slot positions before the paths repeat
+    short slot[kMaxVoices][kMaxSlots * 12] {};
+    short back[kMaxVoices][kMaxSlots * 12] {};         // slots back to where the note began (-1: one endless note)
+    void build(const Score& s)
+    {
+        const int n = std::max(1, s.nSlots);
+        P = s.loop() ? n * 12 : n;
+        for (int lane = 0; lane < kMaxVoices; ++lane)
+        {
+            int v = lane;
+            for (int T = 0; T < P; ++T) { slot[lane][T] = (short) v; v = s.link[T % n][v].to; }
+            for (int T = 0; T < P; ++T)
+            {
+                int k = 0;
+                if (s.loop())
+                {
+                    while (k < P)
+                    {
+                        const int pT = ((T - k - 1) % P + P) % P;
+                        if (!s.link[pT % n][slot[lane][pT]].glide) break;
+                        ++k;
+                    }
+                    back[lane][T] = (short) (k >= P ? -1 : k);
+                }
+                else
+                {
+                    while (T - k > 0 && s.link[T - k - 1][slot[lane][T - k - 1]].glide) ++k;
+                    back[lane][T] = (short) k;
+                }
+            }
+        }
+    }
+};
+
+inline LaneState evalLane(const Score& s, int lane, double u, double barBeats, int mode, const LaneCache* lc = nullptr)
 {
     const int n = s.nSlots;
-    const double L = kBars * barBeats;
+    const double L = s.nBars * barBeats;
     const long long c = (long long) std::floor(u / L);
     const double local = u - (double) c * L;
     int i = 0;
@@ -333,7 +375,14 @@ inline LaneState evalLane(const Score& s, int lane, double u, double barBeats, i
     const double Ts = s.start[i] * barBeats, Te = s.start[i + 1] * barBeats;
     const double lenI = Te - Ts;
 
-    const int v = laneSlot(s, lane, c, i);
+    const int n12 = n * 12;
+    auto LS = [&](long long cc, int ii) -> int
+    {
+        if (lc == nullptr) return laneSlot(s, lane, cc, ii);
+        const long long T = s.loop() ? ((cc * n + ii) % n12 + n12) % n12 : ii;
+        return lc->slot[lane][T];
+    };
+    const int v = LS(c, i);
     const float cur = (float) s.pitch[i][v];
     LaneState st;
     st.pitch = cur;
@@ -356,13 +405,13 @@ inline LaneState evalLane(const Score& s, int lane, double u, double barBeats, i
     double prevLen = barBeats;
     if (i > 0)
     {
-        const int pv = laneSlot(s, lane, c, i - 1);
+        const int pv = LS(c, i - 1);
         li = &s.link[i - 1][pv]; prv = (float) s.pitch[i - 1][pv]; prevLen = slotBeats(s, i - 1, barBeats);
         inOk = li->glide;
     }
     else if (s.loop())
     {
-        const int pv = laneSlot(s, lane, c - 1, n - 1);
+        const int pv = LS(c - 1, n - 1);
         li = &s.link[n - 1][pv]; prv = (float) s.pitch[n - 1][pv]; prevLen = slotBeats(s, n - 1, barBeats);
         inOk = li->glide;
     }
@@ -393,6 +442,12 @@ inline LaneState evalLane(const Score& s, int lane, double u, double barBeats, i
     if (s.loop())
     {
         long long T = c * n + i;       // global slot index
+        if (lc != nullptr)
+        {
+            const int b = lc->back[lane][(T % n12 + n12) % n12];
+            st.noteId = b < 0 ? -1000000 : T - b;
+            return st;
+        }
         for (int k = 0; k < n * 12; ++k)
         {
             const long long pT = T - 1;
@@ -407,7 +462,8 @@ inline LaneState evalLane(const Score& s, int lane, double u, double barBeats, i
     else
     {
         int j = i;
-        while (j > 0 && s.link[j - 1][laneSlot(s, lane, c, j - 1)].glide) --j;
+        if (lc != nullptr) j = i - lc->back[lane][i];
+        else while (j > 0 && s.link[j - 1][laneSlot(s, lane, c, j - 1)].glide) --j;
         st.noteId = c * 1000 + j;
         st.continuing = j == 0 && inOk;     // came in gliding from the chord before the pattern: no attack
     }

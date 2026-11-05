@@ -246,7 +246,7 @@ public:
         tremPh = 0;
         bodies = BodyBank::get(sr);
     }
-    void setScore(const Score& s) { score = s; }
+    void setScore(const Score& s) { score = s; cache.build(score); }
     void setParams(const Params& p) { prm = p; }
 
     // ---- the keyboard: the notes now held (sorted, max 8). Each new chord glides from the last one ----
@@ -337,8 +337,8 @@ public:
                     const double off = (double) (N - 1 - k) * prm.spreadMs * 0.001 * bpm / 60.0;   // top voice first
                     const double u0 = beat + done * beatsPerSample - off;
                     const double u1 = u0 + len * beatsPerSample;
-                    const auto a = evalLane(score, k, u0, barBeats, prm.mode);
-                    const auto b = evalLane(score, k, u1, barBeats, prm.mode);
+                    const auto a = evalLane(score, k, u0, barBeats, prm.mode, &cache);
+                    const auto b = evalLane(score, k, u1, barBeats, prm.mode, &cache);
                     auto& ln = lanes[k];
                     if (ln.voice < 0 || ln.noteId != a.noteId)
                     {
@@ -788,6 +788,7 @@ private:
 
     double sr = 48000;
     Score score;
+    LaneCache cache;
     Params prm;
     Voice voices[kPool];
     Lane lanes[kMaxVoices];
@@ -816,7 +817,7 @@ inline void renderPattern(const Score& s, const Params& p, double sr, double bpm
     e.setScore(s);
     e.setParams(p);
     const double samplesPerBeat = sr * 60.0 / bpm;
-    const long long cycle = (long long) std::llround(kBars * barBeats * samplesPerBeat);
+    const long long cycle = (long long) std::llround(s.nBars * barBeats * samplesPerBeat);
     const int block = 256;
     if (s.loop())
     {
