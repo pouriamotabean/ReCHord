@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(ReChord VERSION 2.1.0)
+project(ReChord VERSION 2.2.0)
 set(CMAKE_CXX_STANDARD 17)
 
 include(FetchContent)
@@ -9,7 +9,7 @@ FetchContent_Declare(JUCE
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(ReChord
-    VERSION 2.1.0
+    VERSION 2.2.0
     COMPANY_NAME "Pouria Motabean"
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE

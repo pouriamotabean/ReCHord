@@ -55,7 +55,7 @@ inline std::vector<int> chordTones(const Chord& c, int n)
 // ---------------- what the user writes ----------------
 struct Pattern
 {
-    bool on[kMaxBars] = { true, true, true, true, false, false, false, false };   // a bar that is off is not in the pattern
+    bool on[kMaxBars] = { true, true, true, true, true, true, true, true };   // a bar that is off is not in the pattern
     bool split[kMaxBars] {};                                    // bar b holds two half-bar chords
     Chord chord[kMaxBars * 2] = { { 9, Min }, { 9, Min }, { 7, Maj }, { 7, Maj }, { 5, Maj }, { 5, Maj }, { 4, Min }, { 4, Min },
                                   { 9, Min }, { 9, Min }, { 7, Maj }, { 7, Maj }, { 5, Maj }, { 5, Maj }, { 4, Min }, { 4, Min } };
