@@ -4,7 +4,7 @@
 #include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "1.8.0"
+ #define RECHORD_VERSION "1.9.1"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -43,7 +43,9 @@ public:
     rc::Chord& chordFor(int key) { return key == -1 ? pattern.entry : key == -2 ? pattern.exit : pattern.chord[key]; }
     void setChord(int key, int root, int quality);
     void setSplit(int bar, bool on);
-    void setBars(int n);                                     // 4 or 8 bars
+    void setBarOn(int bar, bool on);                         // 8 bars; those that are off are not in the pattern
+    bool movePitch(int col, int v, int semis);               // a note up / down (semitones)
+    juce::String slotLabel(int i) const;                     // the chord slot i really plays
     void setEnd(int which, int mode);                        // which: -1 entry, -2 exit
     // edits of one link: t = transition (0..nSlots-1 after slot t, -1 entry -> slot 1), v = voice
     void linkTo(int t, int v, int target) { rc::setLink(score, t, v, target); publish(); }
@@ -89,7 +91,7 @@ private:
     double freeBeat = 0;
     std::atomic<double> seekBeat { -1.0 };
     int lastVoices = 3;
-    bool eightUsed = false;
+
     // keyboard
     bool held[128] {}, sustained[128] {}, stale[128] {}, fresh[128] {}, pedal = false;
     int chordWait = -1, graceLeft = 0;

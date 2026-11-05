@@ -59,7 +59,8 @@ int main(int argc, char** argv)
         proc.learnState = 0;
     }
     // 8 bars, second page
-    proc.setBars(8);
+    for (int b = 4; b < 8; ++b) proc.setBarOn(b, true);
+    proc.setBarOn(6, false);   // 7 bars: bar 7 off
     proc.setChord(8, 0, rc::Maj);
     view->page = 1; if (view->onPage) view->onPage();
     view->setSel(4, 1);
@@ -72,7 +73,11 @@ int main(int argc, char** argv)
         tabs->current = 2; tabs->onChange(2); snap("i_tab_key.png");
         tabs->current = 0; tabs->onChange(0);
     }
-    std::printf("8 bars: slots %d, render ", proc.score.nSlots);
+    // a note moved a semitone: F -> F#
+    proc.movePitch(4, 1, 1);
+    std::printf("slot 4 label after a semitone: %s\n", proc.slotLabel(4).toRawUTF8());
+    snap("j_semitone.png");
+    std::printf("8 bars: slots %d bars %d, render ", proc.score.nSlots, proc.score.nBars);
     {
         auto f8 = proc.renderWav();
         std::printf("%lld bytes\n", (long long) f8.getSize());

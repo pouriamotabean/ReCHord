@@ -138,20 +138,44 @@ void ReChordProcessor::setChord(int key, int root, int quality)
     smart();
 }
 
-void ReChordProcessor::setBars(int n)
+void ReChordProcessor::setBarOn(int bar, bool on)
 {
-    n = n == 8 ? 8 : 4;
-    if (n == pattern.nBars) return;
-    if (n == 8 && !eightUsed)
-        for (int b = 0; b < rc::kBars; ++b)    // the first time: bars 5-8 start as a copy of 1-4
-        {
-            pattern.split[b + 4] = pattern.split[b];
-            pattern.chord[(b + 4) * 2] = pattern.chord[b * 2];
-            pattern.chord[(b + 4) * 2 + 1] = pattern.chord[b * 2 + 1];
-        }
-    if (n == 8) eightUsed = true;
-    pattern.nBars = n;
+    if (!on && pattern.activeBars() <= 1 && pattern.on[bar]) return;     // at least one bar
+    pattern.on[bar] = on;
     smart();
+}
+
+bool ReChordProcessor::movePitch(int col, int v, int semis)
+{
+    if (semis == 0) return false;
+    const int np = score.pitchAt(col, v) + semis;
+    if (np < 21 || np > 108) return false;
+    for (int j = 0; j < score.nVoices; ++j) if (j != v && score.pitchAt(col, j) == np) return false;  // no unisons
+    if (col >= score.nSlots && score.loop()) col = 0;
+    score.pitchAt(col, v) = np;
+    score.scaleMask |= 1 << (np % 12);      // ROBOT steps through the new note too
+    score.edited = true;
+    publish();
+    return true;
+}
+
+// what slot i really plays: the chord as written, or (a note moved off it) the chord its notes make, with * when
+// they make none of the kinds
+juce::String ReChordProcessor::slotLabel(int i) const
+{
+    i = juce::jlimit(0, score.nSlots - 1, i);
+    const auto& c = pattern.chord[score.key[i]];
+    int written = 0;
+    for (int pc : rc::chordTones(c, 4)) written |= 1 << pc;
+    for (int pc : rc::chordTones(c, 3)) written |= 1 << pc;
+    int played = 0, bass = 127;
+    for (int v = 0; v < score.nVoices; ++v) { played |= 1 << (score.pitch[i][v] % 12); bass = std::min(bass, score.pitch[i][v]); }
+    if ((played & ~written) == 0) return rc::chordName(c.root, c.quality, transpose());
+    const auto id = rc::identifyChord(played, bass % 12);
+    int idMask = 0;
+    for (int pc : rc::chordTones(id, 4)) idMask |= 1 << pc;
+    for (int pc : rc::chordTones(id, 3)) idMask |= 1 << pc;
+    return juce::String(rc::chordName(id.root, id.quality, transpose())) + ((played & ~idMask) != 0 ? "*" : "");
 }
 
 void ReChordProcessor::setSplit(int bar, bool on)
@@ -323,7 +347,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     }
     else if (ls == 2)
     {
-        if (!hostPlaying || ppq >= learnStart + pattern.nBars * learnBarBeats) learnState = 3;
+        if (!hostPlaying || ppq >= learnStart + pattern.activeBars() * learnBarBeats) learnState = 3;
         learnPos = hostPlaying ? (ppq - learnStart) / learnBarBeats : -1.0;
     }
 
@@ -331,7 +355,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     const bool listen = apvts.getRawParameterValue("listen")->load() > 0.5f;
     bool playing = false;
     double beat = 0;
-    if (const double sk = seekBeat.exchange(-1.0); sk >= 0) freeBeat = sk;
+    if (listen && !hostPlaying) if (const double sk = seekBeat.exchange(-1.0); sk >= 0) freeBeat = sk;   // kept until LISTEN is on
     if (listen && hostPlaying) { playing = true; beat = ppq; freeBeat = 0; }
     else if (listen)
     {
@@ -386,7 +410,7 @@ void ReChordProcessor::finishLearn()
         if (e.on) on[e.key] = e.beat;
         else if (on.count(e.key)) { notes.push_back({ on[e.key] - learnStart, e.beat - learnStart, e.key }); on.erase(e.key); }
     }
-    for (auto& kv : on) notes.push_back({ kv.second - learnStart, pattern.nBars * learnBarBeats, kv.first });
+    for (auto& kv : on) notes.push_back({ kv.second - learnStart, pattern.activeBars() * learnBarBeats, kv.first });
     const int firstBar = (int) std::llround(learnStart / learnBarBeats);
     learnState = 0;
     learnPos = -1.0;
@@ -437,7 +461,7 @@ bool ReChordProcessor::loadMidiFile(const juce::File& f)
 bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeats, int firstBar)
 {
     struct Half { int mask = 0, bass = -1; std::vector<int> keys; };
-    const int NB = pattern.nBars;
+    const int NB = pattern.activeBars();
     Half half[rc::kMaxBars][2];
     bool any = false;
     for (int b = 0; b < NB; ++b)
@@ -471,7 +495,7 @@ bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeat
     std::vector<std::vector<int>> keysPerSlot;
     for (int b = 0; b < NB; ++b)
     {
-        const int pb = ((firstBar + b) % NB + NB) % NB;
+        const int pb = pattern.barAt(((firstBar + b) % NB + NB) % NB);
         const auto c0 = rc::identifyChord(half[b][0].mask, half[b][0].bass), c1 = rc::identifyChord(half[b][1].mask, half[b][1].bass);
         p.split[pb] = !(c0.root == c1.root && c0.quality == c1.quality) && !half[b][1].keys.empty();
         p.chord[pb * 2] = c0;
@@ -487,7 +511,7 @@ bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeat
     for (int i = 0; i < ns; ++i)
     {
         const int pb = key[i] / 2, hh = key[i] % 2;
-        const int b = ((pb - firstBar) % NB + NB) % NB;
+        const int b = ((pattern.indexOf(pb) - firstBar) % NB + NB) % NB;
         played[(size_t) i] = half[b][hh].keys;
         const int c = (int) played[(size_t) i].size();
         if (count < 0) count = c; else if (c != count) same = false;
@@ -532,7 +556,9 @@ void ReChordProcessor::getStateInformation(juce::MemoryBlock& dest)
     for (bool b : pattern.split) split << (b ? 1 : 0) << " ";
     m.setProperty("chords", chords.trim(), nullptr);
     m.setProperty("split", split.trim(), nullptr);
-    m.setProperty("bars", pattern.nBars, nullptr);
+    juce::String onStr;
+    for (bool b : pattern.on) onStr << (b ? 1 : 0) << " ";
+    m.setProperty("on", onStr.trim(), nullptr);
     m.setProperty("ends", juce::String(pattern.entryMode) + " " + juce::String(pattern.exitMode) + " " + juce::String(pattern.entry.root) + ":" + juce::String(pattern.entry.quality)
                           + " " + juce::String(pattern.exit.root) + ":" + juce::String(pattern.exit.quality), nullptr);
     m.setProperty("nVoices", score.nVoices, nullptr);
@@ -570,8 +596,11 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
                                                                   juce::jlimit(0, rc::kNumQualities - 1, s.fromFirstOccurrenceOf(":", false, false).getIntValue()) }; };
     if (ch.size() == rc::kBars * 2 || ch.size() == rc::kMaxBars * 2) for (int i = 0; i < ch.size(); ++i) pattern.chord[i] = chordOf(ch[i]);
     if (sp.size() == rc::kBars || sp.size() == rc::kMaxBars) for (int i = 0; i < sp.size(); ++i) pattern.split[i] = sp[i].getIntValue() != 0;
-    pattern.nBars = (int) m.getProperty("bars", 4) == 8 ? 8 : 4;
-    eightUsed = ch.size() == rc::kMaxBars * 2;
+    {
+        juce::StringArray onA; onA.addTokens(m.getProperty("on").toString(), " ", "");
+        const bool eight = (int) m.getProperty("bars", 4) == 8;     // 1.8 saved a 4 / 8 switch
+        for (int b = 0; b < rc::kMaxBars; ++b) pattern.on[b] = onA.size() == rc::kMaxBars ? onA[b].getIntValue() != 0 : (b < 4 || eight);
+    }
     if (ends.size() == 4)
     {
         pattern.entryMode = juce::jlimit(0, 2, ends[0].getIntValue());

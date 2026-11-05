@@ -55,23 +55,31 @@ inline std::vector<int> chordTones(const Chord& c, int n)
 // ---------------- what the user writes ----------------
 struct Pattern
 {
-    int nBars = 4;
+    bool on[kMaxBars] = { true, true, true, true, false, false, false, false };   // a bar that is off is not in the pattern
     bool split[kMaxBars] {};                                    // bar b holds two half-bar chords
     Chord chord[kMaxBars * 2] = { { 9, Min }, { 9, Min }, { 7, Maj }, { 7, Maj }, { 5, Maj }, { 5, Maj }, { 4, Min }, { 4, Min },
                                   { 9, Min }, { 9, Min }, { 7, Maj }, { 7, Maj }, { 5, Maj }, { 5, Maj }, { 4, Min }, { 4, Min } };
     int entryMode = Loop, exitMode = Loop;
     Chord entry { 4, Min }, exit { 2, Min };
 
+    // the bars that are on, in order: the pattern is that long
+    int activeBars() const { int k = 0; for (bool x : on) k += x ? 1 : 0; return std::max(1, k); }
+    int barAt(int k) const { for (int b = 0; b < kMaxBars; ++b) if (on[b] && k-- == 0) return b; return 0; }   // k-th bar that is on
+    int indexOf(int bar) const { int k = 0; for (int b = 0; b < bar; ++b) k += on[b] ? 1 : 0; return k; }      // its place in the pattern
+
     // the chord slots in time order: chord index (bar*2 + half) and start in bars
     int slots(int* key, float* start) const
     {
         int n = 0;
-        for (int b = 0; b < nBars; ++b)
+        int k = 0;
+        for (int b = 0; b < kMaxBars; ++b)
         {
-            key[n] = b * 2; start[n] = (float) b; ++n;
-            if (split[b]) { key[n] = b * 2 + 1; start[n] = b + 0.5f; ++n; }
+            if (!on[b]) continue;
+            key[n] = b * 2; start[n] = (float) k; ++n;
+            if (split[b]) { key[n] = b * 2 + 1; start[n] = k + 0.5f; ++n; }
+            ++k;
         }
-        start[n] = (float) nBars;
+        start[n] = (float) k;
         return n;
     }
 };
@@ -216,7 +224,7 @@ inline void buildScore(Score& s, const Pattern& p, int n, int octave)
     s = fresh;
     s.nVoices = n;
     s.nSlots = p.slots(s.key, s.start);
-    s.nBars = p.nBars;
+    s.nBars = p.activeBars();
     s.exitMode = p.exitMode;
     s.entryMode = p.exitMode == Loop ? Loop : p.entryMode;
     const int centre = (n == 1 ? 31 : n == 2 ? 38 : 64) + 12 * octave;   // 1-2 voices: a bass line, down where an 808 sits
