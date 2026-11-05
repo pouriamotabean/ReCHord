@@ -17,10 +17,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
         p.push_back(std::make_unique<APF>(PID { id, 1 }, name, r, def,
                                           juce::AudioParameterFloatAttributes().withStringFromValueFunction(txt)));
     };
-    fl("attack", "Attack", 2.f, 600.f, 35.f, 60.f, msText);
+    p.push_back(std::make_unique<juce::AudioParameterChoice>(PID { "osc", 1 }, "Sound", juce::StringArray { "FM", "Analog", "Strings", "Voice" }, 0));
+    fl("character", "Character", 0.f, 1.f, 0.45f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
+    fl("attack", "Attack", 2.f, 1500.f, 35.f, 120.f, msText);
     fl("bright", "Bright", 0.f, 1.f, 0.45f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
     fl("vibrato", "Vibrato", 0.f, 50.f, 16.f, 0, [](float v, int) { return juce::String(juce::roundToInt(v)) + " ct"; });
-    fl("release", "Release", 30.f, 3000.f, 380.f, 400.f, msText);
+    fl("release", "Release", 30.f, 4000.f, 380.f, 600.f, msText);
+    fl("warmth", "Warmth", 0.f, 1.f, 0.2f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
+    fl("space", "Space", 0.f, 1.f, 0.2f, 0, [](float v, int) { return v < 0.005f ? juce::String("dry") : juce::String(juce::roundToInt(v * 100)) + "%"; });
     p.push_back(std::make_unique<juce::AudioParameterChoice>(PID { "mode", 1 }, "Glide mode", juce::StringArray { "Smooth", "Steps", "Robot" }, 0));
     fl("spread", "Spread", 0.f, 60.f, 12.f, 0, [](float v, int) { return juce::String(juce::roundToInt(v)) + " ms"; });
     fl("double", "Double", 0.f, 1.f, 0.f, 0, [](float v, int) { return v < 0.005f ? juce::String("off") : juce::String(juce::roundToInt(v * 100)) + "%"; });
@@ -29,7 +33,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
     p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "octave", 1 }, "Register", -2, 2, 0,
         juce::AudioParameterIntAttributes().withStringFromValueFunction([](int v, int) { return v == 0 ? juce::String("mid") : (v > 0 ? "+" : "") + juce::String(v) + " oct"; })));
     p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "voices", 1 }, "Voices", 3, 4, 3));
-    fl("volume", "Volume", -30.f, 6.f, -4.f, 0, [](float v, int) { return juce::String(v, 1) + " dB"; });
+    fl("volume", "Volume", -30.f, 6.f, rc::kPresets[0].volumeDb, 0, [](float v, int) { return juce::String(v, 1) + " dB"; });
     p.push_back(std::make_unique<juce::AudioParameterBool>(PID { "listen", 1 }, "Listen", false));
     return { p.begin(), p.end() };
 }
@@ -46,6 +50,10 @@ rc::Params ReChordProcessor::currentParams() const
 {
     auto v = [this](const char* id) { return apvts.getRawParameterValue(id)->load(); };
     rc::Params p;
+    p.osc = (int) v("osc");
+    p.character = v("character");
+    p.warmth = v("warmth");
+    p.space = v("space");
     p.attackMs = v("attack");
     p.releaseMs = v("release");
     p.bright = v("bright");
@@ -56,6 +64,42 @@ rc::Params ReChordProcessor::currentParams() const
     p.transpose = (int) v("transpose");
     p.volumeDb = v("volume");
     return p;
+}
+
+// ---------------- presets: they set only the sound ----------------
+static const char* const kSoundIds[] = { "osc", "character", "attack", "bright", "vibrato", "release", "warmth", "space", "double", "volume" };
+
+static float presetValue(const rc::Preset& s, int i)
+{
+    const float v[] = { (float) s.osc, s.character, s.attackMs, s.bright, s.vibratoCents, s.releaseMs, s.warmth, s.space, s.doubleAmt, s.volumeDb };
+    return v[i];
+}
+
+void ReChordProcessor::loadPreset(int i)
+{
+    i = ((i % rc::kNumPresets) + rc::kNumPresets) % rc::kNumPresets;
+    presetIndex = i;
+    for (int k = 0; k < 10; ++k)
+        if (auto* p = apvts.getParameter(kSoundIds[k]))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(presetValue(rc::kPresets[i], k)));
+            p->endChangeGesture();
+        }
+    ++modelVersion;
+}
+
+bool ReChordProcessor::presetModified() const
+{
+    const auto& s = rc::kPresets[presetIndex];
+    for (int k = 0; k < 10; ++k)
+    {
+        auto* p = apvts.getParameter(kSoundIds[k]);
+        const float now = p->convertFrom0to1(p->getValue()), want = presetValue(s, k);
+        const float range = std::max(1.f, std::abs(want)) * 0.01f;
+        if (std::abs(now - want) > range) return true;
+    }
+    return false;
 }
 
 juce::String ReChordProcessor::slotName(int i) const
@@ -244,6 +288,7 @@ void ReChordProcessor::getStateInformation(juce::MemoryBlock& dest)
     auto st = apvts.copyState();
     juce::ValueTree m("model2");
     m.setProperty("version", RECHORD_VERSION, nullptr);
+    m.setProperty("preset", presetIndex, nullptr);
     juce::String chords, split;
     for (auto& c : pattern.chord) chords << c.root << ":" << c.quality << " ";
     for (bool b : pattern.split) split << (b ? 1 : 0) << " ";
@@ -276,6 +321,7 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
     st.removeChild(st.getChildWithName("model"), nullptr);
     apvts.replaceState(st);
     if (!m.isValid()) { smart(); return; }
+    presetIndex = juce::jlimit(0, rc::kNumPresets - 1, (int) m.getProperty("preset", 0));
 
     juce::StringArray ch, sp, ends;
     ch.addTokens(m.getProperty("chords").toString(), " ", "");

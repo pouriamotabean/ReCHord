@@ -1,10 +1,10 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_formats/juce_audio_formats.h>
-#include "Engine.h"
+#include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "1.1.0"
+ #define RECHORD_VERSION "1.2.0"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -58,6 +58,11 @@ public:
     juce::String slotName(int i) const;                      // chord name of slot i (transposed)
 
     juce::File renderWav();
+
+    // presets (sound only)
+    int presetIndex = 0;
+    void loadPreset(int i);
+    bool presetModified() const;
 
     std::atomic<double> uiBeat { -1.0 };                    // < 0: not playing
     std::atomic<double> hostBpm { 120.0 }, hostBarBeats { 4.0 };

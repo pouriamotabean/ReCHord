@@ -874,21 +874,183 @@ public:
         slider.onValueChange = [this] { repaint(); };
         slider.setDoubleClickReturnValue(true, (double) param->convertFrom0to1(param->getDefaultValue()));
     }
-    void resized() override { slider.setBounds(getLocalBounds().withTrimmedBottom(30).withSizeKeepingCentre(52, 52)); }
+    void resized() override { const int d = std::min(50, getWidth() - 14); slider.setBounds(getLocalBounds().withTrimmedBottom(30).withSizeKeepingCentre(d, d)); }
     void paint(juce::Graphics& g) override
     {
         using namespace ui;
         auto r = getLocalBounds().toFloat();
         g.setColour(label); g.setFont(mono(8.5f, true));
-        g.drawText(title, r.removeFromBottom(30.f).removeFromTop(13.f), juce::Justification::centred);
+        g.drawText(titleText ? titleText() : title, r.removeFromBottom(30.f).removeFromTop(13.f), juce::Justification::centred);
         g.setColour(slider.isMouseOverOrDragging() ? orange : dim); g.setFont(mono(8.5f));
-        g.drawText(param->getCurrentValueAsText(), getLocalBounds().toFloat().removeFromBottom(16.f), juce::Justification::centred);
+        g.drawText(valueText ? valueText() : param->getCurrentValueAsText(), getLocalBounds().toFloat().removeFromBottom(16.f), juce::Justification::centred);
     }
     juce::Slider slider;
+    std::function<juce::String()> titleText, valueText;     // when the meaning depends on another control (CHARACTER)
 private:
     juce::String title;
     juce::RangedAudioParameter* param = nullptr;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> att;
+};
+
+
+// -----------------------------------------------------------------------------------------------------
+// the sound: FM / ANALOG / STRINGS / VOICE (one parameter, four segments)
+// -----------------------------------------------------------------------------------------------------
+class TypeSwitch : public juce::Component
+{
+public:
+    explicit TypeSwitch(ReChordProcessor& p) : proc(p) {}
+    void paint(juce::Graphics& g) override
+    {
+        using namespace ui;
+        const int m = (int) proc.apvts.getRawParameterValue("osc")->load();
+        const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE" };
+        g.setColour(chip); g.fillRoundedRectangle(getLocalBounds().toFloat(), 10.f);
+        for (int i = 0; i < 4; ++i)
+        {
+            const auto r = seg(i);
+            if (m == i) { g.setColour(chipOn); g.fillRoundedRectangle(r, 8.f); }
+            else if (hover == i) { g.setColour(chip2); g.fillRoundedRectangle(r, 8.f); }
+            g.setColour(m == i ? white : soft); g.setFont(mono(9.f, true));
+            g.drawText(names[i], r, juce::Justification::centred);
+            if (m == i) { g.setColour(orange); g.fillRoundedRectangle(r.getCentreX() - 8.f, r.getBottom() - 4.f, 16.f, 2.f, 1.f); }
+        }
+    }
+    void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < 4; ++i) if (seg(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        for (int i = 0; i < 4; ++i)
+            if (seg(i).contains(e.position))
+            {
+                auto* p = proc.apvts.getParameter("osc");
+                p->beginChangeGesture(); p->setValueNotifyingHost(p->convertTo0to1((float) i)); p->endChangeGesture();
+                repaint();
+            }
+    }
+private:
+    ReChordProcessor& proc;
+    int hover = -1;
+    juce::Rectangle<float> seg(int i) const
+    {
+        const float w = ((float) getWidth() - 6.f) / 4.f;
+        return { 3.f + i * w, 3.f, w, (float) getHeight() - 6.f };
+    }
+};
+
+// -----------------------------------------------------------------------------------------------------
+// preset box:  <  NAME  >   (click the name = all presets).  A dot after the name = changed since loading.
+// -----------------------------------------------------------------------------------------------------
+class PresetBox : public juce::Component
+{
+public:
+    explicit PresetBox(ReChordProcessor& p) : proc(p) {}
+    std::function<void()> onOpen;
+    void paint(juce::Graphics& g) override
+    {
+        using namespace ui;
+        const auto r = getLocalBounds().toFloat();
+        g.setColour(chip2); g.fillRoundedRectangle(r, 10.f);
+        for (int k : { 0, 2 })
+        {
+            const auto a = arrow(k);
+            g.setColour(hover == k ? white : dim);
+            juce::Path p;
+            const float cx = a.getCentreX(), cy = a.getCentreY(), d = k == 0 ? 1.f : -1.f;
+            p.startNewSubPath(cx + 2.5f * d, cy - 5.f); p.lineTo(cx - 2.5f * d, cy); p.lineTo(cx + 2.5f * d, cy + 5.f);
+            g.strokePath(p, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        }
+        const auto& ps = rc::kPresets[proc.presetIndex];
+        const auto mid = r.reduced(26.f, 0.f);
+        g.setColour(faint); g.setFont(mono(7.5f, true));
+        g.drawText(ps.group, mid.withHeight(14.f).translated(0, 3.f), juce::Justification::centred);
+        g.setColour(hover == 1 ? white : label.brighter(0.3f)); g.setFont(inter(12.5f, 500));
+        g.drawText(juce::String(ps.name) + (proc.presetModified() ? "  *" : ""), mid.withTrimmedTop(13.f), juce::Justification::centred);
+    }
+    void mouseMove(const juce::MouseEvent& e) override { const int h = at(e.position); if (h != hover) { hover = h; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        const int h = at(e.position);
+        if (h == 0) proc.loadPreset(proc.presetIndex - 1);
+        else if (h == 2) proc.loadPreset(proc.presetIndex + 1);
+        else if (onOpen) onOpen();
+        repaint();
+    }
+private:
+    ReChordProcessor& proc;
+    int hover = -1;
+    juce::Rectangle<float> arrow(int k) const { return k == 0 ? juce::Rectangle<float>(2.f, 0.f, 24.f, (float) getHeight()) : juce::Rectangle<float>((float) getWidth() - 26.f, 0.f, 24.f, (float) getHeight()); }
+    int at(juce::Point<float> p) const { return arrow(0).contains(p) ? 0 : arrow(2).contains(p) ? 2 : 1; }
+};
+
+// every preset, by group
+class PresetPanel : public juce::Component
+{
+public:
+    explicit PresetPanel(ReChordProcessor& p) : proc(p) {}
+    std::function<void()> onClose;
+    void paint(juce::Graphics& g) override
+    {
+        using namespace ui;
+        const auto r = getLocalBounds().toFloat();
+        shadow(g, r, 14.f, 0.9f, 6.f, 10.f);
+        g.setColour(card); g.fillRoundedRectangle(r, 14.f);
+        g.setColour(line); g.drawRoundedRectangle(r.reduced(0.5f), 14.f, 1.f);
+        g.setColour(dim); g.setFont(mono(9.f, true));
+        g.drawText("SOUNDS", juce::Rectangle<float>(18.f, 12.f, 100.f, 14.f), juce::Justification::centredLeft);
+        g.setColour(faint); g.setFont(mono(8.5f));
+        g.drawText("a preset changes only the sound - chords, connections and glides stay", juce::Rectangle<float>(100.f, 12.f, 500.f, 14.f), juce::Justification::centredLeft);
+        const char* groups[] = { "LEADS", "STRINGS", "VOICES", "PADS" };
+        for (int c = 0; c < 4; ++c)
+        {
+            const auto col = column(c);
+            g.setColour(faint); g.setFont(mono(8.f, true));
+            g.drawText(groups[c], col.withHeight(14.f), juce::Justification::centredLeft);
+        }
+        for (int i = 0; i < rc::kNumPresets; ++i)
+        {
+            const auto cell = item(i);
+            const bool on = proc.presetIndex == i, hot = hover == i;
+            g.setColour(on ? orange : hot ? chipOn : chip2);
+            g.fillRoundedRectangle(cell, 8.f);
+            g.setColour(on ? juce::Colours::white : hot ? white : soft);
+            g.setFont(inter(12.f, on ? 600 : 500));
+            g.drawText(rc::kPresets[i].name, cell.reduced(10.f, 0.f), juce::Justification::centredLeft);
+        }
+        const auto x = closeCell();
+        g.setColour(hover == 200 ? white : dim);
+        g.drawLine(x.getX() + 6, x.getY() + 6, x.getRight() - 6, x.getBottom() - 6, 1.4f);
+        g.drawLine(x.getRight() - 6, x.getY() + 6, x.getX() + 6, x.getBottom() - 6, 1.4f);
+    }
+    void mouseMove(const juce::MouseEvent& e) override { const int h = at(e.position); if (h != hover) { hover = h; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        const int h = at(e.position);
+        if (h == 200) { if (onClose) onClose(); return; }
+        if (h >= 0) { proc.loadPreset(h); repaint(); }
+    }
+private:
+    ReChordProcessor& proc;
+    int hover = -1;
+    juce::Rectangle<float> column(int c) const { const float w = ((float) getWidth() - 36.f - 3 * 12.f) / 4.f; return { 18.f + c * (w + 12.f), 40.f, w, (float) getHeight() - 52.f }; }
+    juce::Rectangle<float> item(int i) const
+    {
+        const char* g = rc::kPresets[i].group;
+        const int c = juce::String(g) == "LEADS" ? 0 : juce::String(g) == "STRINGS" ? 1 : juce::String(g) == "VOICES" ? 2 : 3;
+        int row = 0;
+        for (int k = 0; k < i; ++k) if (juce::String(rc::kPresets[k].group) == g) ++row;
+        const auto col = column(c);
+        return { col.getX(), col.getY() + 20.f + row * 38.f, col.getWidth(), 32.f };
+    }
+    juce::Rectangle<float> closeCell() const { return { (float) getWidth() - 36.f, 8.f, 24.f, 24.f }; }
+    int at(juce::Point<float> p) const
+    {
+        if (closeCell().contains(p)) return 200;
+        for (int i = 0; i < rc::kNumPresets; ++i) if (item(i).contains(p)) return i;
+        return -1;
+    }
 };
 
 // -----------------------------------------------------------------------------------------------------
@@ -956,8 +1118,9 @@ class Device : public juce::Component
 {
 public:
     explicit Device(ReChordProcessor& p)
-        : proc(p), view(p), strip(p), picker(p), drag(p), mode(p),
-          kAttack(p, "attack", "ATTACK"), kBright(p, "bright", "BRIGHT"), kVib(p, "vibrato", "VIBRATO"), kRel(p, "release", "RELEASE"),
+        : proc(p), view(p), strip(p), picker(p), drag(p), mode(p), type(p), presetBox(p), presets(p),
+          kChar(p, "character", "CHARACTER"), kAttack(p, "attack", "ATTACK"), kBright(p, "bright", "BRIGHT"), kVib(p, "vibrato", "VIBRATO"),
+          kRel(p, "release", "RELEASE"), kWarm(p, "warmth", "WARMTH"), kSpace(p, "space", "SPACE"),
           kSpread(p, "spread", "SPREAD"), kDouble(p, "double", "DOUBLE"),
           kTrans(p, "transpose", "TRANSPOSE", true), kOct(p, "octave", "REGISTER", true), kVoices(p, "voices", "VOICES"), kVol(p, "volume", "VOLUME")
     {
@@ -966,7 +1129,25 @@ public:
         addChildComponent(picker);
         addAndMakeVisible(drag);
         addAndMakeVisible(mode);
+        addAndMakeVisible(type);
+        addAndMakeVisible(presetBox);
+        addChildComponent(presets);
         for (auto* k : knobs()) addAndMakeVisible(*k);
+        presetBox.onOpen = [this] { closePicker(); presets.setVisible(!presets.isVisible()); presets.toFront(false); };
+        presets.onClose = [this] { presets.setVisible(false); };
+        // CHARACTER means something else for each sound
+        kChar.titleText = [this]
+        {
+            const char* t[] = { "BITE", "DETUNE", "ENSEMBLE", "VOWEL" };
+            return juce::String(t[juce::jlimit(0, 3, (int) proc.apvts.getRawParameterValue("osc")->load())]);
+        };
+        kChar.valueText = [this]
+        {
+            const float c = proc.apvts.getRawParameterValue("character")->load();
+            if ((int) proc.apvts.getRawParameterValue("osc")->load() == rc::OscVoice)
+                return juce::String(c < 0.25f ? "ah" : c < 0.42f ? "ah-oh" : c < 0.58f ? "oh" : c < 0.75f ? "oh-oo" : "oo");
+            return juce::String(juce::roundToInt(c * 100)) + "%";
+        };
 
         listen.setClickingTogglesState(true);
         listenAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(proc.apvts, "listen", listen);
@@ -986,6 +1167,7 @@ public:
         strip.onClick = [this](int key)
         {
             if (key == -99 || (picker.isVisible() && picker.key == key)) { closePicker(); return; }
+            presets.setVisible(false);
             picker.key = key; strip.open = key;
             picker.setVisible(true); picker.toFront(false);
             strip.repaint(); picker.repaint();
@@ -1003,10 +1185,10 @@ public:
         juce::ColourGradient sheen(juce::Colour(0xff151517), 0.f, 0.f, body, 0.f, 220.f, false);
         g.setGradientFill(sheen); g.fillRect(getLocalBounds().removeFromTop(220));
         g.setColour(white); g.setFont(inter(22.f, 600, -0.02f));
-        g.drawText("ReChord", juce::Rectangle<float>(28.f, 18.f, 140.f, 28.f), juce::Justification::centredLeft);
-        g.setColour(orange); g.fillEllipse(124.f, 27.f, 6.f, 6.f);
-        g.setColour(faint); g.setFont(mono(8.5f));
-        g.drawText(U("BY POURIA MOTABEAN   ·   v" RECHORD_VERSION), juce::Rectangle<float>(140.f, 23.f, 260.f, 14.f), juce::Justification::centredLeft);
+        g.drawText("ReChord", juce::Rectangle<float>(28.f, 12.f, 140.f, 28.f), juce::Justification::centredLeft);
+        g.setColour(orange); g.fillEllipse(124.f, 21.f, 6.f, 6.f);
+        g.setColour(faint); g.setFont(mono(7.5f));
+        g.drawText(U("BY POURIA MOTABEAN · v" RECHORD_VERSION), juce::Rectangle<float>(29.f, 40.f, 200.f, 12.f), juce::Justification::centredLeft);
         g.setColour(faint); g.setFont(mono(8.f, true));
         auto group = [&](const char* t, juce::Component& first, juce::Component& last)
         {
@@ -1018,15 +1200,18 @@ public:
             g.drawHorizontalLine((int) y, (x0 + x1) * 0.5f + tw * 0.5f, x1);
             g.setColour(faint);
         };
-        group("SOUND", kAttack, kRel);
+        group("SOUND", kChar, kSpace);
         group("GLIDE", mode, kDouble);
         group("KEY", kTrans, kVol);
     }
     void resized() override
     {
         drag.setBounds(782, 14, 154, 44);
-        smartB.setBounds(686, 20, 84, 32);
-        listen.setBounds(584, 20, 94, 32);
+        smartB.setBounds(700, 20, 74, 32);
+        listen.setBounds(618, 20, 76, 32);
+        type.setBounds(196, 20, 236, 32);
+        presetBox.setBounds(440, 16, 170, 40);
+        presets.setBounds(24 + 30, 72 + 20, 912 - 60, 230);
 
         view.setBounds(24, 72, 912, 300);
         ui::Bars b;
@@ -1042,17 +1227,20 @@ public:
         float x = 24.f;
         const int y = 482;
         auto place = [&](juce::Component& c, float w) { c.setBounds((int) x, y, (int) w, 92); x += w; };
-        place(kAttack, 72); place(kBright, 72); place(kVib, 72); place(kRel, 72);
-        x += 24.f;
-        place(mode, 144); place(kSpread, 72); place(kDouble, 72);
-        x += 24.f;
-        place(kTrans, 72); place(kOct, 72); place(kVoices, 72); place(kVol, 72);
+        place(kChar, 60); place(kAttack, 60); place(kBright, 60); place(kVib, 60); place(kRel, 60); place(kWarm, 60); place(kSpace, 60);
+        x += 18.f;
+        place(mode, 96); place(kSpread, 60); place(kDouble, 60);
+        x += 18.f;
+        place(kTrans, 60); place(kOct, 60); place(kVoices, 60); place(kVol, 60);
     }
     void refresh()
     {
         const double bb = proc.hostBarBeats.load();
         if (view.bars.barBeats != bb) { view.bars.barBeats = bb; strip.bars.barBeats = bb; }
-        view.repaint(); strip.repaint(); mode.repaint(); if (picker.isVisible()) picker.repaint(); drag.repaint();
+        view.repaint(); strip.repaint(); mode.repaint(); type.repaint(); presetBox.repaint(); kChar.repaint();
+        if (picker.isVisible()) picker.repaint();
+        if (presets.isVisible()) presets.repaint();
+        drag.repaint();
         smartB.setToggleState(!proc.score.edited, juce::dontSendNotification);
         if (view.hasSelLink() && (view.selectedV() >= proc.score.nVoices || view.selectedT() >= proc.score.nSlots)) view.setSel(-2, -1);
     }
@@ -1064,10 +1252,13 @@ private:
     Picker picker;
     DragChip drag;
     ModeSwitch mode;
-    Knob kAttack, kBright, kVib, kRel, kSpread, kDouble, kTrans, kOct, kVoices, kVol;
+    TypeSwitch type;
+    PresetBox presetBox;
+    PresetPanel presets;
+    Knob kChar, kAttack, kBright, kVib, kRel, kWarm, kSpace, kSpread, kDouble, kTrans, kOct, kVoices, kVol;
     juce::TextButton listen { "LISTEN" }, smartB { "SMART" }, allB { "ALL" }, resetB { "RESET" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> listenAtt;
-    std::vector<Knob*> knobs() { return { &kAttack, &kBright, &kVib, &kRel, &kSpread, &kDouble, &kTrans, &kOct, &kVoices, &kVol }; }
+    std::vector<Knob*> knobs() { return { &kChar, &kAttack, &kBright, &kVib, &kRel, &kWarm, &kSpace, &kSpread, &kDouble, &kTrans, &kOct, &kVoices, &kVol }; }
 };
 
 class ReChordEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -1093,7 +1284,9 @@ private:
     {
         const int mv = proc.modelVersion.load();
         const double beat = proc.uiBeat.load();
-        const int pv = (int) (proc.apvts.getRawParameterValue("mode")->load() * 1000 + proc.transpose() * 31 + proc.hostBarBeats.load() * 7);
+        unsigned pv = (unsigned) (proc.apvts.getRawParameterValue("mode")->load() * 1000 + (float) (proc.transpose() + 12) * 31 + (float) proc.hostBarBeats.load() * 7);
+        for (auto* id : { "osc", "character", "attack", "bright", "vibrato", "release", "warmth", "space", "double", "volume" })
+            pv = pv * 31u + (unsigned) (int) (proc.apvts.getRawParameterValue(id)->load() * 977.f);
         if (mv != lastModel || beat != lastBeat || pv != lastParams || ++slow % 15 == 0)
         {
             lastModel = mv; lastBeat = beat; lastParams = pv;
@@ -1104,6 +1297,7 @@ private:
     ui::Look look;
     juce::TooltipWindow tooltips { this, 600 };
     Device device;
-    int lastModel = -1, lastParams = 0, slow = 0;
+    int lastModel = -1, slow = 0;
+    unsigned lastParams = 0;
     double lastBeat = -2;
 };
