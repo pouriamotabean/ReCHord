@@ -7,17 +7,17 @@
 
 namespace rc
 {
-enum OscType { OscFM = 0, OscAnalog = 1, OscStrings = 2, OscVoice = 3, kNumOsc };
+enum OscType { OscFM = 0, OscAnalog = 1, OscStrings = 2, OscVoice = 3, OscTine = 4, OscSine = 5, kNumOsc };
 
 struct Params
 {
     int osc = OscFM;
-    float character = 0.45f;      // FM: bite   Analog: detune   Strings: ensemble   Voice: vowel ah -> oh -> oo
+    float character = 0.45f;      // FM: bite  Analog: detune  Strings: ensemble  Voice: vowel ah..oo  Tine: bell  Sine: harmonics
     float attackMs = 35.f, releaseMs = 380.f;
     float bright = 0.45f;         // the filter (follows the pitch)
-    float vibratoCents = 16.f;    // depth of the delayed vibrato
+    float vibratoCents = 16.f;    // depth of the delayed vibrato (Tine: tremolo depth, 0..50 = 0..100%)
     float warmth = 0.2f;          // tape: wow / flutter, drift, saturation, soft top
-    float space = 0.2f;           // reverb
+    float space = 0.2f;           // reverb + a dotted-1/8 echo
     int mode = Smooth;            // glide: smooth / steps / robot
     float doubleAmt = 0.f;        // octave below the lowest voice + octave above the top voice
     float spreadMs = 12.f;        // each lower voice starts a little after the one above
@@ -126,6 +126,10 @@ public:
         wowPh = flutPh = 0;
         toneL = toneR = 0;
         reverb.prepare(sr);
+        echoLen = (int) (sr * 2.2) + 4;
+        echo[0].assign((size_t) echoLen, 0.f); echo[1].assign((size_t) echoLen, 0.f);
+        echoPos = 0; echoLp[0] = echoLp[1] = echoHp[0] = echoHp[1] = 0;
+        tremPh = 0;
     }
     void setScore(const Score& s) { score = s; }
     void setParams(const Params& p) { prm = p; }
@@ -147,6 +151,7 @@ public:
         if (!playing) allOff();
         const double beatsPerSample = bpm / 60.0 / sr;
         const int N = score.nVoices;
+        curBpm = bpm;
 
         int done = 0;
         while (done < n)
@@ -244,7 +249,7 @@ private:
         const float ch = prm.character, br = prm.bright;
         const float f0 = 440.f * std::pow(2.f, (v.pitch - 69.f) / 12.f);
         const float dbl = prm.doubleAmt;
-        static const float oscGain[kNumOsc] = { 1.f, 1.6f, 1.9f, 0.95f };   // the 4 sounds at about the same loudness
+        static const float oscGain[kNumOsc] = { 1.f, 1.6f, 1.9f, 0.95f, 1.1f, 1.0f };   // the 4 sounds at about the same loudness
         const float og = oscGain[std::clamp(prm.osc, 0, kNumOsc - 1)];
 
         // per block: filters
@@ -254,6 +259,8 @@ private:
             case OscFM:      fc = f0 * (2.5f + 11.f * br); break;
             case OscAnalog:  fc = f0 * (1.2f + 16.f * br * br) * (1.f + 0.5f * std::exp(-v.age / 0.25f)); q = 0.85f + 0.6f * br; break;
             case OscStrings: fc = f0 * (1.5f + 12.f * br * br); q = 0.6f; break;
+            case OscTine:    fc = f0 * (2.f + 12.f * br); break;
+            case OscSine:    fc = f0 * (3.f + 14.f * br); break;
             default:         fc = f0 * (3.f + 10.f * br); q = 0.6f; break;
         }
         fc = std::clamp(fc, 180.f, 16000.f);
@@ -278,7 +285,7 @@ private:
             else if (v.env < 1.f) v.env = std::min(1.f, v.env + dt / att);
 
             const float vf = std::clamp((v.age - 0.22f) / 0.6f, 0.f, 1.f);
-            const float vib = (float) std::sin(v.lfo * twoPi) * prm.vibratoCents * 0.01f * vf * vf;
+            const float vib = prm.osc == OscTine ? 0.f : (float) std::sin(v.lfo * twoPi) * prm.vibratoCents * 0.01f * vf * vf;
             v.lfo += v.lfoRate * dt;  if (v.lfo >= 1) v.lfo -= 1;
             v.drift += v.driftRate * dt; if (v.drift >= 1) v.drift -= 1;
             const float drift = (float) std::sin(v.drift * twoPi) * prm.warmth * 0.05f;   // analog drift, up to 5 cents
@@ -345,6 +352,59 @@ private:
                     l *= v.env; r *= v.env;
                     break;
                 }
+                case OscTine:
+                {
+                    // Rhodes colour, held: a warm 1:1 FM body that barks a little at the start and settles,
+                    // plus the bell of the tine (CHARACTER) that rings out fast
+                    const float bark = 0.42f + 0.75f * std::exp(-v.age / 0.22f);
+                    const float mod = (float) std::sin(v.phm * twoPi);
+                    const float body = (float) std::sin(v.ph[0] * twoPi + bark * mod);
+                    const float body2 = (float) std::sin(v.ph[1] * twoPi + bark * 0.8f * mod);
+                    const float bell = ch * ((float) std::sin(v.ph[4] * twoPi) * 0.22f * std::exp(-v.age / 0.11f)
+                                           + (float) std::sin(v.ph[5] * twoPi) * 0.12f * std::exp(-v.age / 0.035f));
+                    const float settle = 0.62f + 0.38f * std::exp(-v.age / 0.8f);     // like a struck key, then held
+                    float d = 0;
+                    if (dbl > 0.001f)
+                    {
+                        if (v.low)  { d += (float) std::sin(v.ph[2] * twoPi + bark * 0.5f * mod) * dbl * 0.8f; v.ph[2] += inc * 0.5; if (v.ph[2] >= 1) v.ph[2] -= 1; }
+                        if (v.high) { d += (float) std::sin(v.ph[3] * twoPi) * dbl * 0.4f; v.ph[3] += inc * 2.0; if (v.ph[3] >= 1) v.ph[3] -= 1; }
+                    }
+                    v.ph[0] += inc;          if (v.ph[0] >= 1) v.ph[0] -= 1;
+                    v.ph[1] += inc * 1.0025; if (v.ph[1] >= 1) v.ph[1] -= 1;
+                    v.phm += inc;            if (v.phm >= 1) v.phm -= 1;
+                    v.ph[4] += inc * 7.0;    if (v.ph[4] >= 1) v.ph[4] -= 1;
+                    v.ph[5] += inc * 14.0;   if (v.ph[5] >= 1) v.ph[5] -= 1;
+                    l = ((body * 0.6f + body2 * 0.4f) * settle + d) * v.env;
+                    r = ((body * 0.4f + body2 * 0.6f) * settle + d) * v.env;
+                    v.lpL1 += a * (l - v.lpL1); v.lpL2 += a * (v.lpL1 - v.lpL2);
+                    v.lpR1 += a * (r - v.lpR1); v.lpR2 += a * (v.lpR1 - v.lpR2);
+                    l = v.lpL2 + bell * v.env * (0.4f + br);       // the bell sits over the filter
+                    r = v.lpR2 + bell * v.env * (0.4f + br);
+                    break;
+                }
+                case OscSine:
+                {
+                    // the softest: a sine, CHARACTER adds a little 2nd and 3rd harmonic (glass .. flute); a second
+                    // sine a few cents up makes it breathe
+                    const float h2 = 0.28f * ch, h3 = 0.16f * ch * ch;
+                    const double t0 = v.ph[0] * twoPi, t1 = v.ph[1] * twoPi;
+                    const float s0 = (float) (std::sin(t0) + h2 * std::sin(2 * t0) + h3 * std::sin(3 * t0));
+                    const float s1 = (float) (std::sin(t1) + h2 * std::sin(2 * t1));
+                    float d = 0;
+                    if (dbl > 0.001f)
+                    {
+                        if (v.low)  { d += (float) std::sin(v.ph[2] * twoPi) * dbl * 0.8f; v.ph[2] += inc * 0.5; if (v.ph[2] >= 1) v.ph[2] -= 1; }
+                        if (v.high) { d += (float) std::sin(v.ph[3] * twoPi) * dbl * 0.4f; v.ph[3] += inc * 2.0; if (v.ph[3] >= 1) v.ph[3] -= 1; }
+                    }
+                    v.ph[0] += inc;          if (v.ph[0] >= 1) v.ph[0] -= 1;
+                    v.ph[1] += inc * 1.0019; if (v.ph[1] >= 1) v.ph[1] -= 1;
+                    l = (s0 * 0.65f + s1 * 0.35f + d) * v.env;
+                    r = (s0 * 0.35f + s1 * 0.65f + d) * v.env;
+                    v.lpL1 += a * (l - v.lpL1); v.lpL2 += a * (v.lpL1 - v.lpL2);
+                    v.lpR1 += a * (r - v.lpR1); v.lpR2 += a * (v.lpR1 - v.lpR2);
+                    l = v.lpL2; r = v.lpR2;
+                    break;
+                }
                 default:
                 {
                     // voice: buzz + breath through 3 formants (a choir-ish "ah" .. "oo")
@@ -389,6 +449,9 @@ private:
         const float depth = ens ? 0.0018f + 0.0026f * prm.character : 0.0022f;
         const float mix = ens ? 0.45f + 0.45f * prm.character : 0.36f;
         const float wet = prm.space * 0.85f;
+        const float trem = prm.osc == OscTine ? std::clamp(prm.vibratoCents / 50.f, 0.f, 1.f) * 0.7f : 0.f;
+        const float echoWet = prm.space * prm.space * 0.55f;                   // the echo comes in as SPACE goes up
+        const double echoDelay = std::min((double) echoLen - 2.0, 0.75 * 60.0 / std::max(20.0, curBpm) * sr);
         for (int i = 0; i < n; ++i)
         {
             toneL += toneA * (L[i] - toneL); toneR += toneA * (R[i] - toneR);
@@ -406,6 +469,34 @@ private:
             chorusPos = (chorusPos + 1) % chorusLen;
             float oL = inL * (1.f - mix * 0.4f) + cR * mix, oR = inR * (1.f - mix * 0.4f) + cL * mix;
             oL = std::tanh(oL * drive) / drive; oR = std::tanh(oR * drive) / drive;
+            if (trem > 0.001f)
+            {
+                // the Rhodes suitcase: the sound swings left / right
+                tremPh += 4.6 / sr; if (tremPh >= 1) tremPh -= 1;
+                const float m = (float) std::sin(tremPh * twoPi);
+                oL *= 1.f - trem * (0.5f + 0.5f * m);
+                oR *= 1.f - trem * (0.5f - 0.5f * m);
+            }
+            if (echoWet > 0.001f)
+            {
+                // a dotted-1/8 ping-pong echo, darker each time round
+                double rp = (double) echoPos - echoDelay;
+                while (rp < 0) rp += echoLen;
+                const int i0 = (int) rp, i1 = (i0 + 1) % echoLen;
+                const float fr = (float) (rp - i0);
+                const float eL = echo[0][(size_t) i0] * (1 - fr) + echo[0][(size_t) i1] * fr;
+                const float eR = echo[1][(size_t) i0] * (1 - fr) + echo[1][(size_t) i1] * fr;
+                for (int c = 0; c < 2; ++c)
+                {
+                    const float x = c == 0 ? eR : eL;                       // ping-pong
+                    echoLp[c] += 0.32f * (x - echoLp[c]);
+                    echoHp[c] += 0.02f * (echoLp[c] - echoHp[c]);
+                }
+                echo[0][(size_t) echoPos] = (oL + oR) * 0.5f + (echoLp[0] - echoHp[0]) * 0.42f;
+                echo[1][(size_t) echoPos] = (echoLp[1] - echoHp[1]) * 0.42f;
+                echoPos = (echoPos + 1) % echoLen;
+                oL += eL * echoWet; oR += eR * echoWet;
+            }
             if (wet > 0.001f)
             {
                 float rl, rr;
@@ -438,6 +529,10 @@ private:
     double chorusPh[3] {}, wowPh = 0, flutPh = 0;
     float toneL = 0, toneR = 0;
     Reverb reverb;
+    std::vector<float> echo[2];
+    int echoLen = 1, echoPos = 0;
+    float echoLp[2] {}, echoHp[2] {};
+    double tremPh = 0, curBpm = 120;
 };
 
 // the 4 bars as a WAV.

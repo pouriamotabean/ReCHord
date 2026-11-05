@@ -31,13 +31,13 @@ int main(int argc, char** argv)
     proc.uiBeat = 5.2;
     std::printf("modified at start: %d\n", (int) proc.presetModified());
     snap("a_default.png");
-    proc.loadPreset(4);
+    proc.loadPreset(13);
     view->setSel(1, 1);
     snap("b_strings.png");
     box->onOpen();
     snap("c_presets.png");
     box->onOpen();
-    proc.loadPreset(7);
+    proc.loadPreset(19);
     proc.apvts.getParameter("character")->setValueNotifyingHost(0.66f);
     std::printf("modified after tweak: %d\n", (int) proc.presetModified());
     snap("d_voice_tweaked.png");

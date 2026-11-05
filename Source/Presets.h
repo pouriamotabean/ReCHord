@@ -27,6 +27,19 @@ inline const Preset kPresets[] = {
     { "Whisper Oh",       "VOICES",  OscVoice,   0.50f,  140, 0.55f, 26,   700, 0.55f, 0.40f, 0.0f, -4.9f },
     { "Bedroom Pad",      "PADS",    OscAnalog,  0.80f,  600, 0.20f,  6,  2200, 0.70f, 0.65f, 0.4f, -2.0f },
     { "Night Organ",      "PADS",    OscFM,      0.15f,   60, 0.30f,  8,   600, 0.55f, 0.45f, 0.5f, -3.2f },
+    // 1.3: the soft ones. KEYS: Rhodes colour, held (VIBRATO = tremolo). DREAM: sine and soft FM
+    { "Velvet Tines",     "KEYS",    OscTine,    0.35f,    8, 0.32f, 15,   900, 0.30f, 0.35f, 0.0f, -0.6f },
+    { "Suitcase Dream",   "KEYS",    OscTine,    0.45f,    8, 0.40f, 28,  1200, 0.25f, 0.55f, 0.0f, 0.5f },
+    { "Dusty Keys",       "KEYS",    OscTine,    0.30f,   10, 0.28f, 12,   900, 0.85f, 0.40f, 0.0f, 0.7f },
+    { "Glass Tines",      "KEYS",    OscTine,    0.75f,    5, 0.52f, 18,  1400, 0.20f, 0.50f, 0.0f, -0.4f },
+    { "Felt Keys",        "KEYS",    OscTine,    0.12f,   25, 0.18f,  8,   800, 0.50f, 0.35f, 0.0f, -0.3f },
+    { "Lullaby Keys",     "KEYS",    OscTine,    0.50f,   10, 0.36f, 22,  1600, 0.35f, 0.62f, 0.4f, -0.3f },
+    { "Pure Sine",        "DREAM",   OscSine,    0.00f,   45, 0.50f, 14,   500, 0.15f, 0.35f, 0.0f, -4.9f },
+    { "Dream Sine",       "DREAM",   OscSine,    0.30f,  180, 0.45f, 18,   900, 0.30f, 0.60f, 0.0f, -3.8f },
+    { "Soft FM Flute",    "DREAM",   OscFM,      0.04f,   70, 0.35f, 20,   600, 0.30f, 0.45f, 0.0f, -4.1f },
+    { "Cloud Lead",       "DREAM",   OscSine,    0.20f,  250, 0.40f, 16,  1200, 0.35f, 0.70f, 0.5f, -3.7f },
+    { "Ocean Pad",        "DREAM",   OscSine,    0.45f,  700, 0.35f,  8,  2600, 0.50f, 0.75f, 0.3f, -2.7f },
+    { "Hum Lead",         "DREAM",   OscFM,      0.18f,   60, 0.22f, 20,   700, 0.60f, 0.40f, 0.0f, -2.9f },
 };
 constexpr int kNumPresets = (int) (sizeof(kPresets) / sizeof(kPresets[0]));
 

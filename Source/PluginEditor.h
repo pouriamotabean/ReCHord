@@ -904,23 +904,23 @@ public:
     {
         using namespace ui;
         const int m = (int) proc.apvts.getRawParameterValue("osc")->load();
-        const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE" };
+        const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE", "TINE", "SINE" };
         g.setColour(chip); g.fillRoundedRectangle(getLocalBounds().toFloat(), 10.f);
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 6; ++i)
         {
             const auto r = seg(i);
             if (m == i) { g.setColour(chipOn); g.fillRoundedRectangle(r, 8.f); }
             else if (hover == i) { g.setColour(chip2); g.fillRoundedRectangle(r, 8.f); }
-            g.setColour(m == i ? white : soft); g.setFont(mono(9.f, true));
-            g.drawText(names[i], r, juce::Justification::centred);
-            if (m == i) { g.setColour(orange); g.fillRoundedRectangle(r.getCentreX() - 8.f, r.getBottom() - 4.f, 16.f, 2.f, 1.f); }
+            g.setColour(m == i ? white : soft); g.setFont(mono(8.5f, true));
+            g.drawText(names[i], r.withTrimmedLeft(m == i ? 8.f : 0.f), juce::Justification::centred);
+            if (m == i) { g.setColour(orange); g.fillEllipse(r.getX() + 7.f, r.getCentreY() - 2.5f, 5.f, 5.f); }
         }
     }
-    void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < 4; ++i) if (seg(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
+    void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < 6; ++i) if (seg(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
     void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
     void mouseDown(const juce::MouseEvent& e) override
     {
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 6; ++i)
             if (seg(i).contains(e.position))
             {
                 auto* p = proc.apvts.getParameter("osc");
@@ -933,8 +933,8 @@ private:
     int hover = -1;
     juce::Rectangle<float> seg(int i) const
     {
-        const float w = ((float) getWidth() - 6.f) / 4.f;
-        return { 3.f + i * w, 3.f, w, (float) getHeight() - 6.f };
+        const float w = ((float) getWidth() - 6.f) / 3.f, h = ((float) getHeight() - 6.f) / 2.f;
+        return { 3.f + (i % 3) * w, 3.f + (i / 3) * h, w, h };
     }
 };
 
@@ -1001,12 +1001,11 @@ public:
         g.drawText("SOUNDS", juce::Rectangle<float>(18.f, 12.f, 100.f, 14.f), juce::Justification::centredLeft);
         g.setColour(faint); g.setFont(mono(8.5f));
         g.drawText("a preset changes only the sound - chords, connections and glides stay", juce::Rectangle<float>(100.f, 12.f, 500.f, 14.f), juce::Justification::centredLeft);
-        const char* groups[] = { "LEADS", "STRINGS", "VOICES", "PADS" };
-        for (int c = 0; c < 4; ++c)
+        for (int c = 0; c < kGroups; ++c)
         {
             const auto col = column(c);
             g.setColour(faint); g.setFont(mono(8.f, true));
-            g.drawText(groups[c], col.withHeight(14.f), juce::Justification::centredLeft);
+            g.drawText(groupName(c), col.withHeight(14.f), juce::Justification::centredLeft);
         }
         for (int i = 0; i < rc::kNumPresets; ++i)
         {
@@ -1015,8 +1014,8 @@ public:
             g.setColour(on ? orange : hot ? chipOn : chip2);
             g.fillRoundedRectangle(cell, 8.f);
             g.setColour(on ? juce::Colours::white : hot ? white : soft);
-            g.setFont(inter(12.f, on ? 600 : 500));
-            g.drawText(rc::kPresets[i].name, cell.reduced(10.f, 0.f), juce::Justification::centredLeft);
+            g.setFont(inter(11.5f, on ? 600 : 500));
+            g.drawText(rc::kPresets[i].name, cell.reduced(9.f, 0.f), juce::Justification::centredLeft);
         }
         const auto x = closeCell();
         g.setColour(hover == 200 ? white : dim);
@@ -1034,11 +1033,14 @@ public:
 private:
     ReChordProcessor& proc;
     int hover = -1;
-    juce::Rectangle<float> column(int c) const { const float w = ((float) getWidth() - 36.f - 3 * 12.f) / 4.f; return { 18.f + c * (w + 12.f), 40.f, w, (float) getHeight() - 52.f }; }
+    static constexpr int kGroups = 6;
+    static const char* groupName(int c) { static const char* g[] = { "KEYS", "DREAM", "LEADS", "STRINGS", "VOICES", "PADS" }; return g[c]; }
+    juce::Rectangle<float> column(int c) const { const float w = ((float) getWidth() - 36.f - (kGroups - 1) * 10.f) / (float) kGroups; return { 18.f + c * (w + 10.f), 40.f, w, (float) getHeight() - 52.f }; }
     juce::Rectangle<float> item(int i) const
     {
         const char* g = rc::kPresets[i].group;
-        const int c = juce::String(g) == "LEADS" ? 0 : juce::String(g) == "STRINGS" ? 1 : juce::String(g) == "VOICES" ? 2 : 3;
+        int c = 0;
+        for (int k = 0; k < kGroups; ++k) if (juce::String(g) == groupName(k)) c = k;
         int row = 0;
         for (int k = 0; k < i; ++k) if (juce::String(rc::kPresets[k].group) == g) ++row;
         const auto col = column(c);
@@ -1135,11 +1137,19 @@ public:
         for (auto* k : knobs()) addAndMakeVisible(*k);
         presetBox.onOpen = [this] { closePicker(); presets.setVisible(!presets.isVisible()); presets.toFront(false); };
         presets.onClose = [this] { presets.setVisible(false); };
+        // on TINE the vibrato knob is the tremolo of a Rhodes suitcase
+        kVib.titleText = [this] { return juce::String((int) proc.apvts.getRawParameterValue("osc")->load() == rc::OscTine ? "TREMOLO" : "VIBRATO"); };
+        kVib.valueText = [this]
+        {
+            const float v = proc.apvts.getRawParameterValue("vibrato")->load();
+            if ((int) proc.apvts.getRawParameterValue("osc")->load() == rc::OscTine) return juce::String(juce::roundToInt(v * 2.f)) + "%";
+            return juce::String(juce::roundToInt(v)) + " ct";
+        };
         // CHARACTER means something else for each sound
         kChar.titleText = [this]
         {
-            const char* t[] = { "BITE", "DETUNE", "ENSEMBLE", "VOWEL" };
-            return juce::String(t[juce::jlimit(0, 3, (int) proc.apvts.getRawParameterValue("osc")->load())]);
+            const char* t[] = { "BITE", "DETUNE", "ENSEMBLE", "VOWEL", "BELL", "HARMONICS" };
+            return juce::String(t[juce::jlimit(0, 5, (int) proc.apvts.getRawParameterValue("osc")->load())]);
         };
         kChar.valueText = [this]
         {
@@ -1209,9 +1219,9 @@ public:
         drag.setBounds(782, 14, 154, 44);
         smartB.setBounds(700, 20, 74, 32);
         listen.setBounds(618, 20, 76, 32);
-        type.setBounds(196, 20, 236, 32);
+        type.setBounds(196, 16, 236, 40);
         presetBox.setBounds(440, 16, 170, 40);
-        presets.setBounds(24 + 30, 72 + 20, 912 - 60, 230);
+        presets.setBounds(24 + 14, 72 + 12, 912 - 28, 288);
 
         view.setBounds(24, 72, 912, 300);
         ui::Bars b;
@@ -1237,7 +1247,7 @@ public:
     {
         const double bb = proc.hostBarBeats.load();
         if (view.bars.barBeats != bb) { view.bars.barBeats = bb; strip.bars.barBeats = bb; }
-        view.repaint(); strip.repaint(); mode.repaint(); type.repaint(); presetBox.repaint(); kChar.repaint();
+        view.repaint(); strip.repaint(); mode.repaint(); type.repaint(); presetBox.repaint(); kChar.repaint(); kVib.repaint();
         if (picker.isVisible()) picker.repaint();
         if (presets.isVisible()) presets.repaint();
         drag.repaint();

@@ -17,7 +17,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
         p.push_back(std::make_unique<APF>(PID { id, 1 }, name, r, def,
                                           juce::AudioParameterFloatAttributes().withStringFromValueFunction(txt)));
     };
-    p.push_back(std::make_unique<juce::AudioParameterChoice>(PID { "osc", 1 }, "Sound", juce::StringArray { "FM", "Analog", "Strings", "Voice" }, 0));
+    p.push_back(std::make_unique<juce::AudioParameterChoice>(PID { "osc", 1 }, "Sound", juce::StringArray { "FM", "Analog", "Strings", "Voice", "Tine", "Sine" }, 0));
     fl("character", "Character", 0.f, 1.f, 0.45f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
     fl("attack", "Attack", 2.f, 1500.f, 35.f, 120.f, msText);
     fl("bright", "Bright", 0.f, 1.f, 0.45f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
@@ -43,6 +43,7 @@ ReChordProcessor::ReChordProcessor()
       apvts(*this, nullptr, "params", layout())
 {
     smart();
+    loadPreset(12);     // a new ReChord starts soft: Velvet Tines
     startTimerHz(15);
 }
 
