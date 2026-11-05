@@ -236,6 +236,32 @@ inline void buildScore(Score& s, const Pattern& p, int n, int octave)
     s.edited = false;
 }
 
+// ---------------- recognising a chord from notes (LEARN / a dropped MIDI file) ----------------
+// best root + kind for a set of pitch classes; the lowest note breaks ties (a root in the bass is likelier)
+inline Chord identifyChord(int pcMask, int bassPc)
+{
+    static const int iv[kNumQualities][4] = { { 0, 4, 7, -1 }, { 0, 3, 7, -1 }, { 0, 4, 7, 10 }, { 0, 4, 7, 11 },
+                                              { 0, 3, 7, 10 }, { 0, 2, 7, -1 }, { 0, 5, 7, -1 }, { 0, 3, 6, -1 } };
+    Chord best;
+    float bestScore = -1e9f;
+    for (int r = 0; r < 12; ++r)
+        for (int q = 0; q < kNumQualities; ++q)
+        {
+            int m = 0;
+            for (int k = 0; k < 4; ++k) if (iv[q][k] >= 0) m |= 1 << ((r + iv[q][k]) % 12);
+            int hit = 0, miss = 0, extra = 0;
+            for (int pc = 0; pc < 12; ++pc)
+            {
+                const bool inC = (m >> pc) & 1, inN = (pcMask >> pc) & 1;
+                hit += inC && inN; miss += inC && !inN; extra += !inC && inN;
+            }
+            float sc = hit * 2.f - miss * 1.6f - extra * 1.2f + (r == bassPc ? 0.7f : 0.f) - (q >= Dom7 ? 0.1f : 0.f);
+            if (!((pcMask >> r) & 1)) sc -= 1.f;                  // the root should be played
+            if (sc > bestScore) { bestScore = sc; best = { r, q }; }
+        }
+    return best;
+}
+
 // ---------------- edits ----------------
 // connect voice v of transition t to voice target; whatever pointed there takes v's old target (one-to-one)
 inline void setLink(Score& s, int t, int v, int target)

@@ -149,6 +149,7 @@ public:
     explicit LinkView(ReChordProcessor& p) : proc(p) {}
     ui::Bars bars;
     std::function<void()> onSelection;
+    juce::String learnText;                       // LEARN / drop status, shown on the bottom line
 
     // the selected glide (for the panel): t, v or -1
     int selectedT() const { return selLinkT; }
@@ -164,7 +165,7 @@ public:
         g.setColour(juce::Colours::white.withAlpha(0.04f)); g.drawRoundedRectangle(r.reduced(0.5f), 14.f, 1.f);
         layout();
         const auto& s = proc.score;
-        const int N = s.nVoices, n = s.nSlots, tr = proc.transpose();
+        const int N = s.nVoices, n = s.nSlots, tr = proc.shift();
 
         g.saveState();
         g.reduceClipRegion(getLocalBounds().reduced(1));
@@ -258,7 +259,12 @@ public:
         if (playX >= 0) { g.setColour(orange.withAlpha(0.7f)); g.drawLine(playX, top - 6.f, playX, bottom + 4.f, 1.2f); }
         g.restoreState();
         const auto bottomLine = juce::Rectangle<float>(40.f, r.getBottom() - 21.f, r.getWidth() - 200.f, 14.f);
-        if (selLinkV >= 0 && selLinkV < N)
+        if (learnText.isNotEmpty())
+        {
+            g.setColour(orange); g.setFont(mono(8.5f, true));
+            g.drawText(learnText, bottomLine.withWidth(r.getWidth() - 50.f), juce::Justification::centredLeft);
+        }
+        else if (selLinkV >= 0 && selLinkV < N)
         {
             // the selected glide, in numbers (ALL / RESET buttons sit right of it)
             const auto& l = s.linkAt(selLinkT, selLinkV);
@@ -283,6 +289,7 @@ public:
         hoverDot = d; hoverT = l.t; hoverV = l.v; hoverHandle = h.kind;
         if (h.kind >= 0) { hoverT = h.t; hoverV = h.v; }
         if (ch) repaint();
+        if (e.position.y < top - 8.f) { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
         setMouseCursor(h.kind == 1 ? juce::MouseCursor::UpDownResizeCursor : h.kind >= 0 ? juce::MouseCursor::LeftRightResizeCursor
                        : d.first != -99 ? juce::MouseCursor::DraggingHandCursor : l.v >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     }
@@ -291,6 +298,13 @@ public:
     void mouseDown(const juce::MouseEvent& e) override
     {
         dragKind = None; noteMode = 0; dropCol = -99; dropV = -1; moved = false;
+        // the bar numbers: play from here
+        if (e.position.y < top - 8.f && e.position.x >= bars.x(0) && e.position.x <= bars.x(rc::kBars * bars.barBeats))
+        {
+            seekFrom(e.position.x);
+            dragKind = Seek;
+            return;
+        }
         downPos = dragPos = e.position;
         if (auto h = handleAt(e.position); h.kind >= 0)
         {
@@ -316,6 +330,7 @@ public:
     }
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (dragKind == Seek) { seekFrom(e.position.x); return; }
         if (e.getDistanceFromDragStart() < 3) return;
         moved = true;
         dragPos = e.position;
@@ -378,7 +393,14 @@ public:
     void setSel(int t, int v) { selLinkT = t; selLinkV = v; repaint(); if (onSelection) onSelection(); }
 
 private:
-    enum { None, DragNote, DragHandle, ClickLink };
+    enum { None, DragNote, DragHandle, ClickLink, Seek };
+    void seekFrom(float x)
+    {
+        const double beat = juce::jlimit(0.0, rc::kBars * bars.barBeats - 0.01, (double) (x - bars.x(0)) / bars.w * bars.barBeats);
+        auto* l = proc.apvts.getParameter("listen");
+        if (l->getValue() < 0.5f) { l->beginChangeGesture(); l->setValueNotifyingHost(1.f); l->endChangeGesture(); }
+        proc.seekTo(beat);
+    }
     struct Trans { int t, from, to; };                     // transition t drawn from column `from` to column `to`
     struct Hit { int t, v; std::vector<juce::Point<float>> pts; };
     struct Hit2 { int t = -1, v = -1; };
@@ -447,7 +469,7 @@ private:
         for (int c = -1; c <= s.nSlots; ++c)
             if (colShown(c))
                 for (int v = 0; v < s.nVoices; ++v) { mn = std::min(mn, colPitch(c, v)); mx = std::max(mx, colPitch(c, v)); }
-        mn += proc.transpose(); mx += proc.transpose();
+        mn += proc.shift(); mx += proc.shift();
         const int span = std::max(20, mx - mn + 8);
         lo = (mn + mx) / 2 - span / 2;
         hi = lo + span;
@@ -462,7 +484,7 @@ private:
     {
         using namespace ui;
         const auto& s = proc.score;
-        const int tp = proc.transpose();
+        const int tp = proc.shift();
         const auto& l = s.linkAt(tr0.t, v);
         const float x0 = colX(tr0.from), x1 = colX(tr0.to);
         const float y0 = yOf((float) (colPitch(tr0.from, v) + tp)), y1 = yOf((float) (colPitch(tr0.to, l.to) + tp));
@@ -570,7 +592,7 @@ private:
         float y0 = 0, y1 = 0;
         for (auto& t : tr)
             if (t.t == handle.t && t.to == handle.toCol)
-            { y0 = yOf((float) (colPitch(t.from, handle.v) + proc.transpose())); y1 = yOf((float) (colPitch(t.to, l.to) + proc.transpose())); }
+            { y0 = yOf((float) (colPitch(t.from, handle.v) + proc.shift())); y1 = yOf((float) (colPitch(t.to, l.to) + proc.shift())); }
         if (std::abs(y1 - y0) < 4.f) return juce::jlimit(-1.f, 1.f, grab.curve + (downPos.y - y) / 80.f);
         const float target = juce::jlimit(0.03f, 0.97f, (y - y0) / (y1 - y0));
         float a = -1.f, b = 1.f;                       // glideShape(0.5) falls as the curve rises
@@ -581,7 +603,7 @@ private:
     std::pair<int, int> dotAt(juce::Point<float> p, float radius = 12.f) const
     {
         const auto& s = proc.score;
-        const int tr = proc.transpose();
+        const int tr = proc.shift();
         std::pair<int, int> best { -99, -1 };
         float bd = radius;
         for (int c = -1; c <= s.nSlots; ++c)
@@ -1122,15 +1144,31 @@ private:
 // -----------------------------------------------------------------------------------------------------
 // the device (design size 960 x 600) and the editor that scales it
 // -----------------------------------------------------------------------------------------------------
-class Device : public juce::Component
+class Device : public juce::Component, public juce::FileDragAndDropTarget
 {
 public:
+    bool isInterestedInFileDrag(const juce::StringArray& files) override
+    {
+        for (auto& f : files) if (f.endsWithIgnoreCase(".mid") || f.endsWithIgnoreCase(".midi")) return true;
+        return false;
+    }
+    void fileDragEnter(const juce::StringArray&, int, int) override { dropping = true; refresh(); }
+    void fileDragExit(const juce::StringArray&) override { dropping = false; refresh(); }
+    void filesDropped(const juce::StringArray& files, int, int) override
+    {
+        dropping = false;
+        for (auto& f : files)
+            if (f.endsWithIgnoreCase(".mid") || f.endsWithIgnoreCase(".midi")) { proc.loadMidiFile(juce::File(f)); break; }
+        closePicker();
+        view.setSel(-2, -1);
+        refresh();
+    }
     explicit Device(ReChordProcessor& p)
         : proc(p), view(p), strip(p), picker(p), drag(p), mode(p), type(p), presetBox(p), presets(p),
           kChar(p, "character", "CHARACTER"), kAttack(p, "attack", "ATTACK"), kBright(p, "bright", "BRIGHT"), kVib(p, "vibrato", "VIBRATO"),
           kRel(p, "release", "RELEASE"), kWarm(p, "warmth", "WARMTH"), kSpace(p, "space", "SPACE"),
           kSpread(p, "spread", "SPREAD"), kDouble(p, "double", "DOUBLE"),
-          kTrans(p, "transpose", "TRANSPOSE", true), kOct(p, "octave", "REGISTER", true), kVoices(p, "voices", "VOICES"), kVol(p, "volume", "VOLUME")
+          kLive(p, "liveGlide", "KEYBOARD"), kTrans(p, "transpose", "TRANSPOSE", true), kOct(p, "octave", "OCTAVE", true), kVoices(p, "voices", "VOICES"), kVol(p, "volume", "VOLUME")
     {
         addAndMakeVisible(view);
         addAndMakeVisible(strip);
@@ -1172,7 +1210,8 @@ public:
                 const int i = juce::jlimit(0, n - 1, juce::roundToInt(x));
                 if (std::abs(x - (float) i) < 0.2f) return juce::String(B[i].name).toLowerCase();
                 const int a = (int) x;
-                return juce::String(B[a].name).toLowerCase().upToFirstOccurrenceOf(" ", false, false) + ">" + juce::String(B[a + 1].name).toLowerCase().upToFirstOccurrenceOf(" ", false, false);
+                auto shortName = [](const char* n) { return juce::String(n).toLowerCase().upToFirstOccurrenceOf(" ", false, false).substring(0, 4); };
+                return shortName(B[a].name) + ">" + shortName(B[a + 1].name);
             }
             return juce::String(juce::roundToInt(c * 100)) + "%";
         };
@@ -1182,7 +1221,9 @@ public:
         listen.setTooltip("On: plays with Cubase when Cubase plays, and on its own when Cubase is stopped. Off: silent");
         smartB.onClick = [this] { proc.smart(); view.setSel(-2, -1); };
         smartB.setTooltip("Lit = the smart voicing, untouched. Click = back to it (drops your connection / octave / glide edits)");
-        for (auto* b : { &listen, &smartB }) addAndMakeVisible(*b);
+        learnB.onClick = [this] { proc.startLearn(); };
+        learnB.setTooltip("Learn 4 bars of chords: put the MIDI part on this track, click LEARN, play Cubase. Or drop a .mid file here");
+        for (auto* b : { &listen, &smartB, &learnB }) addAndMakeVisible(*b);
 
         allB.onClick = [this] { if (view.hasSelLink()) proc.timingToAll(view.selectedT(), view.selectedV()); };
         resetB.onClick = [this] { if (view.hasSelLink()) proc.resetTiming(view.selectedT(), view.selectedV()); };
@@ -1229,16 +1270,17 @@ public:
             g.setColour(faint);
         };
         group("SOUND", kChar, kSpace);
-        group("GLIDE", mode, kDouble);
+        group("GLIDE", mode, kLive);
         group("KEY", kTrans, kVol);
     }
     void resized() override
     {
         drag.setBounds(782, 14, 154, 44);
-        smartB.setBounds(700, 20, 74, 32);
-        listen.setBounds(618, 20, 76, 32);
+        smartB.setBounds(718, 20, 58, 32);
+        learnB.setBounds(658, 20, 56, 32);
+        listen.setBounds(590, 20, 64, 32);
         type.setBounds(196, 16, 236, 40);
-        presetBox.setBounds(440, 16, 170, 40);
+        presetBox.setBounds(438, 16, 146, 40);
         presets.setBounds(24 + 14, 72 + 12, 912 - 28, 250);
 
         view.setBounds(24, 72, 912, 300);
@@ -1255,27 +1297,33 @@ public:
         float x = 24.f;
         const int y = 482;
         auto place = [&](juce::Component& c, float w) { c.setBounds((int) x, y, (int) w, 92); x += w; };
-        place(kChar, 60); place(kAttack, 60); place(kBright, 60); place(kVib, 60); place(kRel, 60); place(kWarm, 60); place(kSpace, 60);
-        x += 18.f;
-        place(mode, 96); place(kSpread, 60); place(kDouble, 60);
-        x += 18.f;
-        place(kTrans, 60); place(kOct, 60); place(kVoices, 60); place(kVol, 60);
+        place(kChar, 56); place(kAttack, 56); place(kBright, 56); place(kVib, 56); place(kRel, 56); place(kWarm, 56); place(kSpace, 56);
+        x += 12.f;
+        place(mode, 88); place(kSpread, 56); place(kDouble, 56); place(kLive, 56);
+        x += 12.f;
+        place(kTrans, 56); place(kOct, 56); place(kVoices, 56); place(kVol, 56);
     }
     void refresh()
     {
         const double bb = proc.hostBarBeats.load();
         if (view.bars.barBeats != bb) { view.bars.barBeats = bb; strip.bars.barBeats = bb; }
+        if (presets.isVisible()) {}
         view.repaint(); strip.repaint(); mode.repaint(); type.repaint(); presetBox.repaint(); kChar.repaint(); kVib.repaint();
         if (picker.isVisible()) picker.repaint();
         if (presets.isVisible()) presets.repaint();
         drag.repaint();
         smartB.setToggleState(!proc.score.edited, juce::dontSendNotification);
+        learnB.setToggleState(proc.learnState.load() != 0, juce::dontSendNotification);
+        view.learnText = proc.learnState.load() == 1 ? juce::String("LEARN: waiting for Cubase to play - the next bar line starts 4 bars")
+                       : proc.learnState.load() == 2 ? "LEARN: listening, bar " + juce::String(juce::jlimit(1, 4, (int) proc.learnPos.load() + 1)) + " of 4"
+                       : dropping ? juce::String("DROP: the chords of the first 4 bars of this MIDI file") : juce::String();
         if (view.hasSelLink() && (view.selectedV() >= proc.score.nVoices || view.selectedT() >= proc.score.nSlots)) view.setSel(-2, -1);
     }
 
     LinkView view;
 private:
     ReChordProcessor& proc;
+    bool dropping = false;
     ChordStrip strip;
     Picker picker;
     DragChip drag;
@@ -1283,10 +1331,10 @@ private:
     TypeSwitch type;
     PresetBox presetBox;
     PresetPanel presets;
-    Knob kChar, kAttack, kBright, kVib, kRel, kWarm, kSpace, kSpread, kDouble, kTrans, kOct, kVoices, kVol;
-    juce::TextButton listen { "LISTEN" }, smartB { "SMART" }, allB { "ALL" }, resetB { "RESET" };
+    Knob kChar, kAttack, kBright, kVib, kRel, kWarm, kSpace, kSpread, kDouble, kLive, kTrans, kOct, kVoices, kVol;
+    juce::TextButton listen { "LISTEN" }, smartB { "SMART" }, learnB { "LEARN" }, allB { "ALL" }, resetB { "RESET" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> listenAtt;
-    std::vector<Knob*> knobs() { return { &kChar, &kAttack, &kBright, &kVib, &kRel, &kWarm, &kSpace, &kSpread, &kDouble, &kTrans, &kOct, &kVoices, &kVol }; }
+    std::vector<Knob*> knobs() { return { &kChar, &kAttack, &kBright, &kVib, &kRel, &kWarm, &kSpace, &kSpread, &kDouble, &kLive, &kTrans, &kOct, &kVoices, &kVol }; }
 };
 
 class ReChordEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -1313,7 +1361,7 @@ private:
         const int mv = proc.modelVersion.load();
         const double beat = proc.uiBeat.load();
         unsigned pv = (unsigned) (proc.apvts.getRawParameterValue("mode")->load() * 1000 + (float) (proc.transpose() + 12) * 31 + (float) proc.hostBarBeats.load() * 7);
-        for (auto* id : { "osc", "character", "attack", "bright", "vibrato", "release", "warmth", "space", "double", "volume" })
+        for (auto* id : { "osc", "character", "attack", "bright", "vibrato", "release", "warmth", "space", "double", "volume", "octave", "liveGlide" })
             pv = pv * 31u + (unsigned) (int) (proc.apvts.getRawParameterValue(id)->load() * 977.f);
         if (mv != lastModel || beat != lastBeat || pv != lastParams || ++slow % 15 == 0)
         {

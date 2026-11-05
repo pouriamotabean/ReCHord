@@ -4,7 +4,7 @@
 #include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "1.4.0"
+ #define RECHORD_VERSION "1.5.0"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -55,6 +55,7 @@ public:
 
     rc::Params currentParams() const;
     int transpose() const { return (int) apvts.getRawParameterValue("transpose")->load(); }
+    int shift() const { return transpose() + 12 * (int) apvts.getRawParameterValue("octave")->load(); }   // what the notes sound at
     juce::String slotName(int i) const;                      // chord name of slot i (transposed)
 
     juce::File renderWav();
@@ -63,6 +64,15 @@ public:
     int presetIndex = 0;
     void loadPreset(int i);
     bool presetModified() const;
+
+    // keyboard + LEARN + a dropped MIDI file
+    struct Note { double a, b; int key; };                   // in beats from the first bar
+    void startLearn();                                       // 0 off -> 1 armed -> 2 recording -> 3 done (message thread finishes)
+    std::atomic<int> learnState { 0 };
+    std::atomic<double> learnPos { -1.0 };                   // bars recorded so far (display)
+    bool loadMidiFile(const juce::File&);
+    bool applyNotes(const std::vector<Note>&, double barBeats, int firstBar);
+    void seekTo(double beat) { seekBeat = beat; }
 
     std::atomic<double> uiBeat { -1.0 };                    // < 0: not playing
     std::atomic<double> hostBpm { 120.0 }, hostBarBeats { 4.0 };
@@ -76,7 +86,17 @@ private:
     rc::Score audioScore;
     bool scoreDirty = true;
     double freeBeat = 0;
-    int lastVoices = 3, lastOctave = 0;
+    std::atomic<double> seekBeat { -1.0 };
+    int lastVoices = 3;
+    // keyboard
+    bool held[128] {}, sustained[128] {}, pedal = false, keysChanged = false;
+    int chordWait = -1, graceLeft = 0;
+    // LEARN
+    struct LearnEvent { double beat; int key; bool on; };
+    std::vector<LearnEvent> learnEvents = std::vector<LearnEvent>(4096);
+    std::atomic<int> learnCount { 0 };
+    double learnStart = 0, learnBarBeats = 4;
+    void finishLearn();
 
     static juce::AudioProcessorValueTreeState::ParameterLayout layout();
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ReChordProcessor)

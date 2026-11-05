@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <map>
 
 using APF = juce::AudioParameterFloat;
 using PID = juce::ParameterID;
@@ -30,8 +31,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
     fl("double", "Double", 0.f, 1.f, 0.f, 0, [](float v, int) { return v < 0.005f ? juce::String("off") : juce::String(juce::roundToInt(v * 100)) + "%"; });
     p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "transpose", 1 }, "Transpose", -12, 12, 0,
         juce::AudioParameterIntAttributes().withStringFromValueFunction([](int v, int) { return (v > 0 ? "+" : "") + juce::String(v); })));
-    p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "octave", 1 }, "Register", -2, 2, 0,
-        juce::AudioParameterIntAttributes().withStringFromValueFunction([](int v, int) { return v == 0 ? juce::String("mid") : (v > 0 ? "+" : "") + juce::String(v) + " oct"; })));
+    p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "octave", 1 }, "Octave", -3, 2, 0,
+        juce::AudioParameterIntAttributes().withStringFromValueFunction([](int v, int) { return v == 0 ? juce::String("0") : (v > 0 ? "+" : "") + juce::String(v) + " oct"; })));
+    fl("liveGlide", "Keyboard glide", 0.f, 2000.f, 250.f, 300.f, msText);
     p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "voices", 1 }, "Voices", 3, 4, 3));
     fl("volume", "Volume", -30.f, 6.f, rc::kPresets[0].volumeDb, 0, [](float v, int) { return juce::String(v, 1) + " dB"; });
     p.push_back(std::make_unique<juce::AudioParameterBool>(PID { "listen", 1 }, "Listen", false));
@@ -62,7 +64,9 @@ rc::Params ReChordProcessor::currentParams() const
     p.mode = (int) v("mode");
     p.doubleAmt = v("double");
     p.spreadMs = v("spread");
-    p.transpose = (int) v("transpose");
+    p.transpose = (int) v("transpose") + 12 * (int) v("octave");
+    p.liveShift = 12 * (int) v("octave");
+    p.liveGlideMs = v("liveGlide");
     p.volumeDb = v("volume");
     return p;
 }
@@ -122,8 +126,7 @@ void ReChordProcessor::publish()
 void ReChordProcessor::smart()
 {
     lastVoices = (int) apvts.getRawParameterValue("voices")->load();
-    lastOctave = (int) apvts.getRawParameterValue("octave")->load();
-    rc::buildScore(score, pattern, lastVoices, lastOctave);
+    rc::buildScore(score, pattern, lastVoices, 0);       // OCTAVE moves the sound, not the voicing
     publish();
 }
 
@@ -190,8 +193,8 @@ bool ReChordProcessor::moveOctave(int col, int v, int dir)
 void ReChordProcessor::timerCallback()
 {
     const int nv = (int) apvts.getRawParameterValue("voices")->load();
-    const int oc = (int) apvts.getRawParameterValue("octave")->load();
-    if (nv != lastVoices || oc != lastOctave) smart();
+    if (nv != lastVoices) smart();
+    if (learnState.load() == 3) finishLearn();
 }
 
 void ReChordProcessor::prepareToPlay(double sampleRate, int)
@@ -203,7 +206,6 @@ void ReChordProcessor::prepareToPlay(double sampleRate, int)
 void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals nd;
-    midi.clear();
     const int n = buffer.getNumSamples();
     for (int c = 2; c < buffer.getNumChannels(); ++c) buffer.clear(c, 0, n);
     {
@@ -226,10 +228,63 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     hostBpm = bpm;
     hostBarBeats = barBeats;
 
+    // ---- the keyboard: notes held (+ the sustain pedal); a new chord is taken 25 ms after its first key ----
+    const double spb = getSampleRate() * 60.0 / bpm;
+    for (const auto m : midi)
+    {
+        const auto msg = m.getMessage();
+        const int key = msg.getNoteNumber();
+        if (msg.isNoteOn()) { held[key] = true; sustained[key] = false; keysChanged = true; }
+        else if (msg.isNoteOff()) { held[key] = false; if (pedal) sustained[key] = true; keysChanged = true; }
+        else if (msg.isSustainPedalOn()) pedal = true;
+        else if (msg.isSustainPedalOff()) { pedal = false; for (auto& x : sustained) x = false; keysChanged = true; }
+        else if (msg.isAllNotesOff() || msg.isAllSoundOff()) { for (auto& x : held) x = false; for (auto& x : sustained) x = false; keysChanged = true; }
+        // LEARN: every note while recording, with its position in beats
+        if (learnState.load() == 2 && hostPlaying && (msg.isNoteOn() || msg.isNoteOff()) && learnCount < (int) learnEvents.size())
+            learnEvents[(size_t) learnCount++] = { ppq + m.samplePosition / spb, key, msg.isNoteOn() };
+    }
+    midi.clear();
+    if (keysChanged) { keysChanged = false; chordWait = (int) (getSampleRate() * 0.025); }
+    if (chordWait >= 0)
+    {
+        chordWait -= n;
+        if (chordWait < 0)
+        {
+            int notes[128], k = 0;
+            for (int i = 0; i < 128; ++i) if (held[i] || sustained[i]) notes[k++] = i;
+            if (k == 0 && engine.liveActive()) graceLeft = (int) (getSampleRate() * 0.25);    // a short gap between chords still glides
+            else engine.setLive(notes, k);
+        }
+    }
+    if (graceLeft > 0)
+    {
+        graceLeft -= n;
+        bool any = false;
+        for (int i = 0; i < 128; ++i) any = any || held[i] || sustained[i];
+        if (any) graceLeft = 0;
+        else if (graceLeft <= 0) engine.setLive(nullptr, 0);
+    }
+
+    // ---- LEARN: armed -> records from the next bar line for 4 bars of Cubase playback ----
+    const int ls = learnState.load();
+    if (ls == 1 && hostPlaying)
+    {
+        learnStart = std::ceil(ppq / barBeats - 1e-6) * barBeats;
+        learnBarBeats = barBeats;
+        learnCount = 0;
+        learnState = 2;
+    }
+    else if (ls == 2)
+    {
+        if (!hostPlaying || ppq >= learnStart + rc::kBars * learnBarBeats) learnState = 3;
+        learnPos = hostPlaying ? (ppq - learnStart) / learnBarBeats : -1.0;
+    }
+
     // LISTEN on: with Cubase when it plays, otherwise on its own. Off: silent.
     const bool listen = apvts.getRawParameterValue("listen")->load() > 0.5f;
     bool playing = false;
     double beat = 0;
+    if (const double sk = seekBeat.exchange(-1.0); sk >= 0) freeBeat = sk;
     if (listen && hostPlaying) { playing = true; beat = ppq; freeBeat = 0; }
     else if (listen)
     {
@@ -268,6 +323,140 @@ juce::File ReChordProcessor::renderWav()
     w->writeFromAudioSampleBuffer(buf, 0, buf.getNumSamples());
     w.reset();
     return f;
+}
+
+// ---------------- chords from notes: LEARN and a dropped MIDI file ----------------
+void ReChordProcessor::startLearn() { learnCount = 0; learnPos = -1.0; learnState = learnState.load() == 0 ? 1 : 0; }
+
+void ReChordProcessor::finishLearn()
+{
+    std::vector<Note> notes;
+    std::map<int, double> on;
+    const int count = learnCount;
+    for (int i = 0; i < count; ++i)
+    {
+        const auto& e = learnEvents[(size_t) i];
+        if (e.on) on[e.key] = e.beat;
+        else if (on.count(e.key)) { notes.push_back({ on[e.key] - learnStart, e.beat - learnStart, e.key }); on.erase(e.key); }
+    }
+    for (auto& kv : on) notes.push_back({ kv.second - learnStart, rc::kBars * learnBarBeats, kv.first });
+    const int firstBar = (int) std::llround(learnStart / learnBarBeats);
+    learnState = 0;
+    learnPos = -1.0;
+    applyNotes(notes, learnBarBeats, firstBar);
+}
+
+bool ReChordProcessor::loadMidiFile(const juce::File& f)
+{
+    juce::FileInputStream in(f);
+    juce::MidiFile mf;
+    if (!in.openedOk() || !mf.readFrom(in)) return false;
+    const int tpq = mf.getTimeFormat();
+    if (tpq <= 0) return false;
+    double barBeats = 4.0;
+    juce::MidiMessageSequence meta;
+    mf.findAllTimeSigEvents(meta);
+    if (meta.getNumEvents() > 0)
+    {
+        int num = 4, den = 4;
+        meta.getEventPointer(0)->message.getTimeSignatureInfo(num, den);
+        if (num > 0 && den > 0) barBeats = num * 4.0 / den;
+    }
+    std::vector<Note> notes;
+    for (int t = 0; t < mf.getNumTracks(); ++t)
+    {
+        juce::MidiMessageSequence seq(*mf.getTrack(t));
+        seq.updateMatchedPairs();
+        for (int i = 0; i < seq.getNumEvents(); ++i)
+        {
+            auto* ev = seq.getEventPointer(i);
+            if (!ev->message.isNoteOn()) continue;
+            const double a = ev->message.getTimeStamp() / tpq;
+            const double b = ev->noteOffObject != nullptr ? ev->noteOffObject->message.getTimeStamp() / tpq : a + 1.0;
+            notes.push_back({ a, b, ev->message.getNoteNumber() });
+        }
+    }
+    if (notes.empty()) return false;
+    // from the bar of the first note
+    double first = 1e9;
+    for (auto& nt : notes) first = std::min(first, nt.a);
+    const double start = std::floor(first / barBeats + 1e-6) * barBeats;
+    for (auto& nt : notes) { nt.a -= start; nt.b -= start; }
+    return applyNotes(notes, barBeats, 0);
+}
+
+// 4 bars of notes -> the pattern: a chord per half bar (a bar is split when its halves differ), and the voicing
+// as played when every chord has the same 3 or 4 notes
+bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeats, int firstBar)
+{
+    struct Half { int mask = 0, bass = -1; std::vector<int> keys; };
+    Half half[rc::kBars][2];
+    bool any = false;
+    for (int b = 0; b < rc::kBars; ++b)
+        for (int h = 0; h < 2; ++h)
+        {
+            const double w0 = b * barBeats + h * barBeats * 0.5, w1 = w0 + barBeats * 0.5;
+            auto& H = half[b][h];
+            for (auto& nt : notes)
+            {
+                const double ov = std::min(w1, nt.b) - std::max(w0, nt.a);
+                if (ov < (w1 - w0) * 0.3) continue;
+                if (std::find(H.keys.begin(), H.keys.end(), nt.key) == H.keys.end()) H.keys.push_back(nt.key);
+            }
+            std::sort(H.keys.begin(), H.keys.end());
+            for (int k : H.keys) H.mask |= 1 << (k % 12);
+            if (!H.keys.empty()) { H.bass = H.keys.front() % 12; any = true; }
+        }
+    if (!any) return false;
+    // empty halves keep the chord before them
+    for (int b = 0; b < rc::kBars; ++b)
+        for (int h = 0; h < 2; ++h)
+            if (half[b][h].keys.empty())
+            {
+                const int pb = h == 1 ? b : (b + rc::kBars - 1) % rc::kBars, ph = h == 1 ? 0 : 1;
+                if (!half[pb][ph].keys.empty()) half[b][h] = half[pb][ph];
+                else if (!half[b][1 - h].keys.empty()) half[b][h] = half[b][1 - h];
+            }
+    // the cycle in the plugin is tied to the project: bar B of the project plays pattern bar B mod 4
+    rc::Pattern p = pattern;
+    p.entryMode = p.exitMode = rc::Loop;
+    std::vector<std::vector<int>> keysPerSlot;
+    for (int b = 0; b < rc::kBars; ++b)
+    {
+        const int pb = ((firstBar + b) % rc::kBars + rc::kBars) % rc::kBars;
+        const auto c0 = rc::identifyChord(half[b][0].mask, half[b][0].bass), c1 = rc::identifyChord(half[b][1].mask, half[b][1].bass);
+        p.split[pb] = !(c0.root == c1.root && c0.quality == c1.quality) && !half[b][1].keys.empty();
+        p.chord[pb * 2] = c0;
+        p.chord[pb * 2 + 1] = p.split[pb] ? c1 : c0;
+    }
+    pattern = p;
+    // the voicing as played
+    int key[rc::kMaxSlots]; float st[rc::kMaxSlots + 1];
+    const int ns = pattern.slots(key, st);
+    std::vector<std::vector<int>> played((size_t) ns);
+    int count = -1;
+    bool same = true;
+    for (int i = 0; i < ns; ++i)
+    {
+        const int pb = key[i] / 2, hh = key[i] % 2;
+        const int b = ((pb - firstBar) % rc::kBars + rc::kBars) % rc::kBars;
+        played[(size_t) i] = half[b][hh].keys;
+        const int c = (int) played[(size_t) i].size();
+        if (count < 0) count = c; else if (c != count) same = false;
+    }
+    if (same && (count == 3 || count == 4))
+    {
+        auto* vp = apvts.getParameter("voices");
+        vp->setValueNotifyingHost(vp->convertTo0to1((float) count));
+    }
+    smart();
+    if (same && count == score.nVoices)
+    {
+        for (int i = 0; i < ns; ++i) for (int v = 0; v < count; ++v) score.pitch[i][v] = played[(size_t) i][(size_t) v];
+        score.edited = true;      // "as played" is not the smart voicing
+        publish();
+    }
+    return true;
 }
 
 // ---------------- state ----------------

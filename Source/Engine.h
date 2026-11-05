@@ -25,7 +25,9 @@ struct Params
     int mode = Smooth;            // glide: smooth / steps / robot
     float doubleAmt = 0.f;        // octave below the lowest voice + octave above the top voice
     float spreadMs = 12.f;        // each lower voice starts a little after the one above
-    int transpose = 0;
+    int transpose = 0;            // pattern: transpose + octave (semitones)
+    int liveShift = 0;            // keyboard: octave (semitones)
+    float liveGlideMs = 250.f;    // keyboard: time to glide from one chord to the next
     float volumeDb = -6.f;
 };
 
@@ -229,6 +231,7 @@ public:
         sr = sampleRate;
         for (auto& v : voices) v = Voice();
         for (auto& l : lanes) l = Lane();
+        for (auto& l : live) l = LiveLane();
         chorusLen = (int) (sr * 0.04) + 4;
         chorusBuf[0].assign((size_t) chorusLen, 0.f);
         chorusBuf[1].assign((size_t) chorusLen, 0.f);
@@ -245,6 +248,64 @@ public:
     }
     void setScore(const Score& s) { score = s; }
     void setParams(const Params& p) { prm = p; }
+
+    // ---- the keyboard: the notes now held (sorted, max 8). Each new chord glides from the last one ----
+    static constexpr int kLive = 8;
+    void setLive(const int* notes, int n)
+    {
+        n = std::min(n, kLive);
+        // the voices sounding now, low to high
+        int old[kLive], oldLane[kLive], no = 0;
+        for (int k = 0; k < kLive; ++k) if (live[k].voice >= 0) { old[no] = k; ++no; }
+        std::sort(old, old + no, [this](int a, int b) { return live[a].cur < live[b].cur; });
+        for (int i = 0; i < no; ++i) oldLane[i] = old[i];
+        // smallest movement, no crossing: match / a voice stops / a voice starts
+        float dp[kLive + 1][kLive + 1];
+        int how[kLive + 1][kLive + 1];
+        const float birth = 7.f;
+        for (int i = 0; i <= no; ++i)
+            for (int j = 0; j <= n; ++j)
+            {
+                if (i == 0 && j == 0) { dp[0][0] = 0; how[0][0] = 0; continue; }
+                float b = 1e9f; int h = 0;
+                if (i > 0 && j > 0) { const float c = dp[i - 1][j - 1] + std::min(24.f, std::abs(live[oldLane[i - 1]].cur - (float) (notes[j - 1] + prm.liveShift))); if (c < b) { b = c; h = 1; } }
+                if (i > 0) { const float c = dp[i - 1][j] + birth; if (c < b) { b = c; h = 2; } }
+                if (j > 0) { const float c = dp[i][j - 1] + birth; if (c < b) { b = c; h = 3; } }
+                dp[i][j] = b; how[i][j] = h;
+            }
+        int i = no, j = n;
+        const float lowest = n > 0 ? (float) (notes[0] + prm.liveShift) : 0.f, highest = n > 0 ? (float) (notes[n - 1] + prm.liveShift) : 0.f;
+        while (i > 0 || j > 0)
+        {
+            const int h = how[i][j];
+            if (h == 1)
+            {
+                auto& L = live[oldLane[i - 1]];
+                L.from = L.cur; L.to = (float) (notes[j - 1] + prm.liveShift); L.t = 0;
+                --i; --j;
+            }
+            else if (h == 2)
+            {
+                auto& L = live[oldLane[i - 1]];
+                if (L.voice >= 0) voices[L.voice].releasing = true;
+                L.voice = -1;
+                --i;
+            }
+            else
+            {
+                const float p = (float) (notes[j - 1] + prm.liveShift);
+                for (auto& L : live)
+                    if (L.voice < 0)
+                    {
+                        L.voice = startVoice(p, false, p == lowest && n > 1, p == highest && n > 1, j - 1, n);
+                        L.from = L.to = L.cur = p; L.t = 1e9;
+                        break;
+                    }
+                --j;
+            }
+        }
+    }
+    bool liveActive() const { for (auto& L : live) if (L.voice >= 0) return true; return false; }
 
     void allOff()
     {
@@ -295,6 +356,19 @@ public:
                 for (int k = N; k < kMaxVoices; ++k)
                     if (lanes[k].voice >= 0) { voices[lanes[k].voice].releasing = true; lanes[k].voice = -1; }
             }
+            // the keyboard voices
+            for (auto& L : live)
+            {
+                if (L.voice < 0) continue;
+                if (!voices[L.voice].active || voices[L.voice].releasing) { L.voice = -1; continue; }
+                const double dur = std::max(0.0005, prm.liveGlideMs * 0.001);
+                const double t1 = L.t + len / sr;
+                auto at = [&](double t) { return t >= dur ? L.to : glideValue(L.from, L.to, (float) (t / dur), 0.f, prm.mode, score.scaleMask | liveMask()); };
+                const float pa = at(L.t), pb = at(t1);
+                L.t = t1; L.cur = pb;
+                voices[L.voice].pitch = pa;
+                voices[L.voice].pitchStep = (pb - pa) / (float) len;
+            }
             // tape wow + flutter: one slow wobble for every voice (warmth)
             wowPh += 0.55 * len / sr;   if (wowPh >= 1) wowPh -= 1;
             flutPh += 6.3 * len / sr;   if (flutPh >= 1) flutPh -= 1;
@@ -308,7 +382,7 @@ public:
 
 private:
     static constexpr int kSub = 32;
-    static constexpr int kPool = 16;
+    static constexpr int kPool = 24;
 
     struct Voice
     {
@@ -322,6 +396,9 @@ private:
         unsigned order = 0, noise = 1;
     };
     struct Lane { int voice = -1; long long noteId = -1; };
+    struct LiveLane { int voice = -1; float from = 60, to = 60, cur = 60; double t = 0; };
+    LiveLane live[kLive];
+    int liveMask() const { int m = 0; for (auto& L : live) if (L.voice >= 0) m |= 1 << (((int) std::lround(L.to) % 12 + 12) % 12); return m; }
 
     int startVoice(float pitch, bool continuing, bool low, bool high, int lane, int nLanes)
     {
@@ -333,6 +410,7 @@ private:
             for (int i = 0; i < kPool; ++i) if (voices[i].releasing && voices[i].env < e) { e = voices[i].env; best = i; }
             if (best < 0) { unsigned o = ~0u; for (int i = 0; i < kPool; ++i) if (voices[i].order < o) { o = voices[i].order; best = i; } }
             for (auto& l : lanes) if (l.voice == best) l.voice = -1;
+            for (auto& l : live) if (l.voice == best) l.voice = -1;
         }
         auto& v = voices[best];
         v = Voice();

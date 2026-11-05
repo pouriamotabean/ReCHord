@@ -42,6 +42,22 @@ int main(int argc, char** argv)
     std::printf("modified after tweak: %d\n", (int) proc.presetModified());
     snap("d_voice_tweaked.png");
 
+    // a dropped MIDI file
+    if (argc > 2)
+    {
+        const bool ok = proc.loadMidiFile(juce::File(argv[2]));
+        std::printf("midi file: %d  slots %d voices %d edited %d\n", (int) ok, proc.score.nSlots, proc.score.nVoices, (int) proc.score.edited);
+        for (int i = 0; i < proc.score.nSlots; ++i)
+        {
+            std::printf("  %.1f %-6s", proc.score.start[i], proc.slotName(i).toRawUTF8());
+            for (int v = 0; v < proc.score.nVoices; ++v) std::printf(" %s", rc::noteName(proc.score.pitch[i][v]).c_str());
+            std::printf("\n");
+        }
+        proc.apvts.getParameter("octave")->setValueNotifyingHost(proc.apvts.getParameter("octave")->convertTo0to1(-2.f));
+        proc.learnState = 2; proc.learnPos = 1.4;
+        snap("e_midi_octave.png");
+        proc.learnState = 0;
+    }
     juce::MemoryBlock mb; proc.getStateInformation(mb);
     ReChordProcessor p2; p2.setStateInformation(mb.getData(), (int) mb.getSize());
     std::printf("state: preset %d osc %.0f character %.2f\n", p2.presetIndex, p2.apvts.getRawParameterValue("osc")->load(), p2.apvts.getRawParameterValue("character")->load());
