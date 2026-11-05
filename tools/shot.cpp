@@ -1,5 +1,13 @@
-// Linux only: open the editor offscreen, simulate a few edits, save PNGs + a rendered WAV
+// Linux only: open the editor offscreen, make a few edits, save PNGs, check state + render
 #include "../Source/PluginEditor.h"
+
+template <class T> static T* findChild(juce::Component* c)
+{
+    if (auto* t = dynamic_cast<T*>(c)) return t;
+    for (auto* ch : c->getChildren()) if (auto* t = findChild<T>(ch)) return t;
+    return nullptr;
+}
+
 int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -8,33 +16,53 @@ int main(int argc, char** argv)
     proc.prepareToPlay(48000, 512);
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
     ed->setSize(960, 600);
+    auto* dev = findChild<Device>(ed.get());
+    auto* view = findChild<LinkView>(ed.get());
+    auto* strip = findChild<ChordStrip>(ed.get());
     auto snap = [&](const juce::String& name)
     {
+        dev->refresh();
         auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.5f);
         juce::File f(outDir + "/" + name);
         f.deleteFile();
         juce::FileOutputStream os(f);
         juce::PNGImageFormat().writeImageToStream(img, os);
     };
-    // fake playhead position for the screenshot
     proc.uiBeat = 5.2;
-    snap("ui_default.png");
-    // edits: swap two links in bar 2, set one link to END, move a note an octave
-    proc.linkTo(1, 0, 1);
-    proc.toggleMode(2, 2);
-    proc.moveOctave(3, 0, -1);
-    snap("ui_edited.png");
-    // chord change + 4 voices
-    proc.setChord(0, 0, rc::Maj7);
+    snap("a_default.png");
+
+    // half bar with Dm in bar 2, one glide with its own timing, selected
+    proc.setSplit(1, true);
+    proc.setChord(3, 2, rc::Min);
+    proc.setTiming(0, 2, 1.5f, 0.75f, -0.7f);
+    proc.setTiming(2, 0, 0.25f, 0.5f, 0.8f);
+    proc.toggleGlide(3, 1);
+    view->setSel(0, 2);
+    snap("b_halfbar_edited.png");
+
+    // open pattern: ends on Dm, starts fresh; picker open on AFTER
+    proc.chordFor(-2) = { 2, rc::Min };
+    proc.setEnd(-2, rc::ToChord);
+    view->setSel(-2, -1);
+    strip->onClick(-2);
+    snap("c_to_Dm_picker.png");
+    strip->onClick(-99);
+
+    // steps mode + 4 voices + double
+    proc.apvts.getParameter("mode")->setValueNotifyingHost(0.5f);
     proc.apvts.getParameter("voices")->setValueNotifyingHost(1.f);
-    juce::Thread::sleep(200);
+    proc.apvts.getParameter("double")->setValueNotifyingHost(0.6f);
     proc.smart();
-    snap("ui_4voices.png");
-    // state round trip
+    snap("d_steps_4v.png");
+
     juce::MemoryBlock mb; proc.getStateInformation(mb);
     ReChordProcessor p2; p2.setStateInformation(mb.getData(), (int) mb.getSize());
-    std::printf("state ok: %d voices, chord1 %s, glide[2][2]=%d\n", p2.score.nVoices,
-                rc::chordName(p2.chords[0].root, p2.chords[0].quality).c_str(), (int) p2.score.glide[2][2]);
+    std::printf("state: %d slots, %d voices, exit %d, entry %d, edited %d, mode %.0f\n", p2.score.nSlots, p2.score.nVoices,
+                p2.score.exitMode, p2.score.entryMode, (int) p2.score.edited, p2.apvts.getRawParameterValue("mode")->load());
+    proc.setTiming(1, 1, 1.f, 0.5f, 0.5f);
+    proc.getStateInformation(mb);
+    ReChordProcessor p3; p3.setStateInformation(mb.getData(), (int) mb.getSize());
+    std::printf("edited link kept: early %.2f late %.2f curve %.2f edited %d\n", p3.score.link[1][1].early, p3.score.link[1][1].late, p3.score.link[1][1].curve, (int) p3.score.edited);
     auto f = proc.renderWav();
     std::printf("wav: %s (%lld bytes)\n", f.getFullPathName().toRawUTF8(), (long long) f.getSize());
     ed.reset();

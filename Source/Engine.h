@@ -12,9 +12,8 @@ struct Params
     float attackMs = 35.f, releaseMs = 380.f;
     float bright = 0.45f;         // 0..1: FM index + filter
     float vibratoCents = 16.f;    // depth of the delayed vibrato
-    float early = 0.5f;           // beats before the bar line the glide starts (1/8 note)
-    float late = 0.25f;           // beats after the bar line it lands (1/16 note)
-    float curve = 0.f;            // -1 early / +1 late
+    int mode = Smooth;            // smooth / steps / robot
+    float doubleAmt = 0.f;        // 0..1: octave below the lowest voice + octave above the top voice
     float spreadMs = 12.f;        // each lower voice starts a little after the one above
     int transpose = 0;
     float volumeDb = -6.f;
@@ -68,13 +67,13 @@ public:
                     const double off = (double) (N - 1 - k) * prm.spreadMs * 0.001 * bpm / 60.0;   // top voice first
                     const double u0 = beat + done * beatsPerSample - off;
                     const double u1 = u0 + len * beatsPerSample;
-                    const auto a = evalLane(score, k, u0, barBeats, prm.early, prm.late, prm.curve);
-                    const auto b = evalLane(score, k, u1, barBeats, prm.early, prm.late, prm.curve);
+                    const auto a = evalLane(score, k, u0, barBeats, prm.mode);
+                    const auto b = evalLane(score, k, u1, barBeats, prm.mode);
                     auto& ln = lanes[k];
                     if (ln.voice < 0 || ln.noteId != a.noteId)
                     {
                         if (ln.voice >= 0) voices[ln.voice].releasing = true;
-                        ln.voice = startVoice(a.pitch + (float) prm.transpose);
+                        ln.voice = startVoice(a.pitch + (float) prm.transpose, a.continuing, k == 0, k == N - 1);
                         ln.noteId = a.noteId;
                     }
                     auto& v = voices[ln.voice];
@@ -126,11 +125,13 @@ private:
         double ph1 = 0, ph2 = 0, phm = 0, lfo = 0;
         float fb = 0, env = 0, age = 0, pitch = 60, pitchStep = 0, lfoRate = 5.2f;
         float lpL1 = 0, lpL2 = 0, lpR1 = 0, lpR2 = 0;
+        double phLo = 0, phHi = 0;
+        bool low = false, high = false;       // this voice also plays its octave copy (DOUBLE)
         unsigned order = 0;
     };
     struct Lane { int voice = -1; long long noteId = -1; };
 
-    int startVoice(float pitch)
+    int startVoice(float pitch, bool continuing, bool low, bool high)
     {
         int best = -1;
         for (int i = 0; i < kPool; ++i) if (!voices[i].active) { best = i; break; }
@@ -150,6 +151,8 @@ private:
         v.lfoRate = 4.9f + (float) (rng >> 8) / 16777216.f * 0.7f;       // each voice its own vibrato speed
         v.ph2 = (double) ((rng >> 4) & 0xffff) / 65536.0;
         v.lfo = 0.25;
+        v.low = low; v.high = high;
+        if (continuing) { v.env = 1.f; v.age = 1.5f; }   // a note that was already sounding before the pattern
         return best;
     }
 
@@ -190,11 +193,18 @@ private:
             const float I = index * bite;
             const float c1 = (float) std::sin(v.ph1 * twoPi + I * mod);
             const float c2 = (float) std::sin(v.ph2 * twoPi + I * 0.85f * mod);
+            // octave copies: same modulator, carriers an octave down / up
+            float dbl = 0.f;
+            if (prm.doubleAmt > 0.001f)
+            {
+                if (v.low)  { dbl += (float) std::sin(v.phLo * twoPi + I * 0.7f * mod) * prm.doubleAmt * 0.8f; v.phLo += f * 0.5 / sr; if (v.phLo >= 1) v.phLo -= 1; }
+                if (v.high) { dbl += (float) std::sin(v.phHi * twoPi + I * 0.5f * mod) * prm.doubleAmt * 0.45f; v.phHi += f * 2.0 / sr; if (v.phHi >= 1) v.phHi -= 1; }
+            }
             v.ph1 += f / sr;            if (v.ph1 >= 1) v.ph1 -= 1;
             v.ph2 += f * 1.0038 / sr;   if (v.ph2 >= 1) v.ph2 -= 1;
             v.phm += f / sr;            if (v.phm >= 1) v.phm -= 1;
 
-            float l = (c1 * 0.62f + c2 * 0.38f) * v.env, r = (c1 * 0.38f + c2 * 0.62f) * v.env;
+            float l = (c1 * 0.62f + c2 * 0.38f + dbl) * v.env, r = (c1 * 0.38f + c2 * 0.62f + dbl) * v.env;
             v.lpL1 += a * (l - v.lpL1); v.lpL2 += a * (v.lpL1 - v.lpL2);
             v.lpR1 += a * (r - v.lpR1); v.lpR2 += a * (v.lpR1 - v.lpR2);
             L[i] += v.lpL2;
@@ -226,9 +236,12 @@ private:
     double chorusPh = 0, chorusPh2 = 0;
 };
 
-// the 4 bars as a loop that joins without a click: render from one cycle earlier, crossfade the seam
-inline void renderLoop(const Score& s, const Params& p, double sr, double bpm, double barBeats,
-                       std::vector<float>& outL, std::vector<float>& outR)
+// the 4 bars as a WAV.
+//  loop: render from one cycle earlier and crossfade the seam, so it joins itself without a click.
+//  otherwise: the pattern from its first beat; ends that join the next / previous pattern get a 3 ms edge,
+//  an end with no next chord lets the notes ring out.
+inline void renderPattern(const Score& s, const Params& p, double sr, double bpm, double barBeats,
+                          std::vector<float>& outL, std::vector<float>& outR)
 {
     Engine e;
     e.prepare(sr);
@@ -236,24 +249,43 @@ inline void renderLoop(const Score& s, const Params& p, double sr, double bpm, d
     e.setParams(p);
     const double samplesPerBeat = sr * 60.0 / bpm;
     const long long cycle = (long long) std::llround(kBars * barBeats * samplesPerBeat);
-    const long long fade = (long long) (sr * 0.03);
-    const long long total = 2 * cycle + fade;
-    std::vector<float> L((size_t) total), R((size_t) total);
     const int block = 256;
+    if (s.loop())
+    {
+        const long long fade = (long long) (sr * 0.03);
+        const long long total = 2 * cycle + fade;
+        std::vector<float> L((size_t) total), R((size_t) total);
+        for (long long pos = 0; pos < total; pos += block)
+        {
+            const int n = (int) std::min<long long>(block, total - pos);
+            e.process(L.data() + pos, R.data() + pos, n, true, (double) pos / samplesPerBeat, bpm, barBeats);
+        }
+        outL.assign(L.begin() + cycle, L.begin() + 2 * cycle);
+        outR.assign(R.begin() + cycle, R.begin() + 2 * cycle);
+        for (long long i = 0; i < fade; ++i)
+        {
+            const float w = (float) i / (float) fade;
+            const float a = 0.5f - 0.5f * std::cos(w * 3.14159265f), b = 1.f - a;
+            outL[(size_t) i] = outL[(size_t) i] * a + L[(size_t) (2 * cycle + i)] * b;
+            outR[(size_t) i] = outR[(size_t) i] * a + R[(size_t) (2 * cycle + i)] * b;
+        }
+        return;
+    }
+    const long long tail = s.exitMode == None ? (long long) (sr * (p.releaseMs * 0.001 * 1.2 + 0.05)) : 0;
+    const long long total = cycle + tail;
+    outL.assign((size_t) total, 0.f);
+    outR.assign((size_t) total, 0.f);
     for (long long pos = 0; pos < total; pos += block)
     {
         const int n = (int) std::min<long long>(block, total - pos);
-        e.process(L.data() + pos, R.data() + pos, n, true, (double) pos / samplesPerBeat, bpm, barBeats);
+        e.process(outL.data() + pos, outR.data() + pos, n, pos < cycle, (double) pos / samplesPerBeat, bpm, barBeats);
     }
-    outL.assign(L.begin() + cycle, L.begin() + 2 * cycle);
-    outR.assign(R.begin() + cycle, R.begin() + 2 * cycle);
-    // the start of the loop fades from "what comes after the end" into itself
-    for (long long i = 0; i < fade; ++i)
+    const long long edge = (long long) (sr * 0.003);
+    for (long long i = 0; i < edge; ++i)
     {
-        const float w = (float) i / (float) fade;
-        const float a = 0.5f - 0.5f * std::cos(w * 3.14159265f), b = 1.f - a;   // amplitudes sum to 1 (the two sides are nearly the same sound)
-        outL[(size_t) i] = outL[(size_t) i] * a + L[(size_t) (2 * cycle + i)] * b;
-        outR[(size_t) i] = outR[(size_t) i] * a + R[(size_t) (2 * cycle + i)] * b;
+        const float w = (float) i / (float) edge;
+        if (s.entryMode == ToChord) { outL[(size_t) i] *= w; outR[(size_t) i] *= w; }
+        if (s.exitMode == ToChord) { outL[(size_t) (total - 1 - i)] *= w; outR[(size_t) (total - 1 - i)] *= w; }
     }
 }
 } // namespace rc

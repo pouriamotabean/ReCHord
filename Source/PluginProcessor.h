@@ -4,7 +4,7 @@
 #include "Engine.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "1.0.0"
+ #define RECHORD_VERSION "1.1.0"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -24,7 +24,7 @@ public:
     const juce::String getName() const override { return "ReChord"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
-    double getTailLengthSeconds() const override { return 2.5; }
+    double getTailLengthSeconds() const override { return 3.0; }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
@@ -36,24 +36,30 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
     // ---- the model (message thread) ----
-    rc::Chord chords[rc::kBars] = { { 9, rc::Min }, { 7, rc::Maj }, { 5, rc::Maj }, { 4, rc::Min } };
+    rc::Pattern pattern;
     rc::Score score;
-    void setChord(int bar, int root, int quality);
-    void smart();                                  // fresh smart voicing + default links (drops edits)
-    void linkTo(int bar, int slot, int target) { rc::setLink(score, bar, slot, target); publish(); }
-    void toggleMode(int bar, int slot) { score.glide[bar][slot] = !score.glide[bar][slot]; publish(); }
-    bool moveOctave(int bar, int slot, int dir);
+    void smart();                                            // fresh smart voicing + default links (drops edits)
+    // key: 0..7 = bar*2 + half, -1 = the chord before the pattern, -2 = the chord after it
+    rc::Chord& chordFor(int key) { return key == -1 ? pattern.entry : key == -2 ? pattern.exit : pattern.chord[key]; }
+    void setChord(int key, int root, int quality);
+    void setSplit(int bar, bool on);
+    void setEnd(int which, int mode);                        // which: -1 entry, -2 exit
+    // edits of one link: t = transition (0..nSlots-1 after slot t, -1 entry -> slot 1), v = voice
+    void linkTo(int t, int v, int target) { rc::setLink(score, t, v, target); publish(); }
+    void toggleGlide(int t, int v) { auto& l = score.linkAt(t, v); l.glide = !l.glide; score.edited = true; publish(); }
+    void setTiming(int t, int v, float early, float late, float curve);
+    void resetTiming(int t, int v) { setTiming(t, v, rc::Link().early, rc::Link().late, rc::Link().curve); }
+    void timingToAll(int t, int v);
+    bool moveOctave(int col, int v, int dir);                // col: slot, -1 entry, nSlots exit
     std::atomic<int> modelVersion { 0 };
 
     rc::Params currentParams() const;
     int transpose() const { return (int) apvts.getRawParameterValue("transpose")->load(); }
+    juce::String slotName(int i) const;                      // chord name of slot i (transposed)
 
-    // the 4 bars as a looping WAV at the project tempo; returns the file
     juce::File renderWav();
 
-    // transport, for the display
-    std::atomic<bool> preview { false };
-    std::atomic<double> uiBeat { -1.0 };     // < 0: not playing
+    std::atomic<double> uiBeat { -1.0 };                    // < 0: not playing
     std::atomic<double> hostBpm { 120.0 }, hostBarBeats { 4.0 };
 
 private:
@@ -64,7 +70,7 @@ private:
     juce::SpinLock scoreLock;
     rc::Score audioScore;
     bool scoreDirty = true;
-    double previewBeat = 0;
+    double freeBeat = 0;
     int lastVoices = 3, lastOctave = 0;
 
     static juce::AudioProcessorValueTreeState::ParameterLayout layout();

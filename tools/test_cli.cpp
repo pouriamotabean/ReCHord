@@ -1,11 +1,12 @@
-// ReChord engine test: rechord_test out.wav [bpm] ; prints voicings, links and the pitch path of each lane
+// ReChord engine test (no JUCE): rechord_test outdir
+// renders several patterns and prints voicings + the pitch path around changes
 #include "../Source/Engine.h"
 #include <cstdio>
 #include <cstdint>
 
-static void writeWav(const char* path, const std::vector<float>& L, const std::vector<float>& R, int sr)
+static void writeWav(const std::string& path, const std::vector<float>& L, const std::vector<float>& R, int sr)
 {
-    FILE* f = std::fopen(path, "wb");
+    FILE* f = std::fopen(path.c_str(), "wb");
     const uint32_t n = (uint32_t) L.size(), data = n * 4;
     auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
     auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
@@ -20,40 +21,62 @@ static void writeWav(const char* path, const std::vector<float>& L, const std::v
     std::fclose(f);
 }
 
+static void show(const rc::Score& s, const rc::Pattern& p)
+{
+    if (!s.loop() && s.entryMode == rc::ToChord)
+    {
+        std::printf("  entry %-6s", rc::chordName(p.entry.root, p.entry.quality).c_str());
+        for (int v = 0; v < s.nVoices; ++v) std::printf(" %s->%d", rc::noteName(s.entryPitch[v]).c_str(), s.entryLink[v].to);
+        std::printf("\n");
+    }
+    for (int i = 0; i < s.nSlots; ++i)
+    {
+        const auto& c = p.chord[s.key[i]];
+        std::printf("  %.1f %-6s", s.start[i], rc::chordName(c.root, c.quality).c_str());
+        for (int v = 0; v < s.nVoices; ++v) std::printf(" %s->%d%s", rc::noteName(s.pitch[i][v]).c_str(), s.link[i][v].to, s.link[i][v].glide ? "" : "x");
+        std::printf("\n");
+    }
+    if (!s.loop() && s.exitMode == rc::ToChord)
+    {
+        std::printf("  exit  %-6s", rc::chordName(p.exit.root, p.exit.quality).c_str());
+        for (int v = 0; v < s.nVoices; ++v) std::printf(" %s", rc::noteName(s.exitPitch[v]).c_str());
+        std::printf("\n");
+    }
+}
+
 int main(int argc, char** argv)
 {
-    const char* out = argc > 1 ? argv[1] : "test.wav";
-    const double bpm = argc > 2 ? std::atof(argv[2]) : 100;
-    const int nv = argc > 3 ? std::atoi(argv[3]) : 3;
-    rc::Chord ch[4] = { { 9, rc::Min }, { 7, rc::Maj }, { 5, rc::Maj }, { 4, rc::Min } };
-    if (argc > 4) { ch[0] = { 0, rc::Maj7 }; ch[1] = { 9, rc::Min7 }; ch[2] = { 2, rc::Min7 }; ch[3] = { 7, rc::Dom7 }; }
-    rc::Score s;
-    rc::smartVoicing(s, ch, nv, 0);
-    for (int b = 0; b < 4; ++b)
+    const std::string out = argc > 1 ? argv[1] : ".";
+    rc::Params prm;
+    struct Case { const char* name; rc::Pattern p; int voices; int mode; float dbl; };
+    std::vector<Case> cases;
+    { rc::Pattern p; cases.push_back({ "loop_smooth", p, 3, rc::Smooth, 0.f }); }
+    { rc::Pattern p; cases.push_back({ "loop_steps", p, 3, rc::Steps, 0.f }); }
+    { rc::Pattern p; cases.push_back({ "loop_robot_double", p, 4, rc::Robot, 0.8f }); }
+    { rc::Pattern p; p.split[1] = true; p.chord[3] = { 2, rc::Min }; p.split[3] = true; p.chord[7] = { 4, rc::Maj };
+      cases.push_back({ "halfbars", p, 3, rc::Smooth, 0.f }); }
+    { rc::Pattern p; p.exitMode = rc::ToChord; p.exit = { 2, rc::Min }; p.entryMode = rc::None; cases.push_back({ "A_to_Dm", p, 3, rc::Smooth, 0.f }); }
+    { rc::Pattern p; p.exitMode = rc::None; p.entryMode = rc::ToChord; p.entry = { 4, rc::Min };
+      p.chord[0] = { 2, rc::Min }; p.chord[2] = { 10, rc::Maj }; p.chord[4] = { 0, rc::Maj }; p.chord[6] = { 9, rc::Min };
+      cases.push_back({ "B_from_Em", p, 3, rc::Smooth, 0.f }); }
+
+    for (auto& cs : cases)
     {
-        std::printf("%-6s", rc::chordName(ch[b].root, ch[b].quality).c_str());
-        for (int v = 0; v < s.nVoices; ++v) std::printf(" %-4s->%d", rc::noteName(s.pitch[b][v]).c_str(), s.perm[b][v]);
+        rc::Score s;
+        rc::buildScore(s, cs.p, cs.voices, 0);
+        std::printf("%s  (slots %d, voices %d)\n", cs.name, s.nSlots, s.nVoices);
+        show(s, cs.p);
+        prm.mode = cs.mode;
+        prm.doubleAmt = cs.dbl;
+        std::printf("  lane0 around beat 4:");
+        for (double u = 3.3; u <= 4.45; u += 0.1) std::printf(" %.2f", rc::evalLane(s, 0, u, 4, cs.mode).pitch);
         std::printf("\n");
+        std::vector<float> L, R;
+        rc::renderPattern(s, prm, 48000, 100, 4, L, R);
+        float peak = 0;
+        for (size_t i = 0; i < L.size(); ++i) peak = std::max(peak, std::max(std::abs(L[i]), std::abs(R[i])));
+        std::printf("  %.2f s, peak %.3f\n", L.size() / 48000.0, peak);
+        writeWav(out + "/" + cs.name + ".wav", L, R, 48000);
     }
-    rc::Params p;
-    // pitch path of each lane around the bar line between bar 1 and 2 (beats 3..5)
-    for (int k = 0; k < s.nVoices; ++k)
-    {
-        std::printf("lane %d:", k);
-        for (double u = 3.0; u <= 4.6; u += 0.1)
-            std::printf(" %.2f", rc::evalLane(s, k, u, 4, p.early, p.late, p.curve).pitch);
-        std::printf("\n");
-    }
-    std::vector<float> L, R;
-    rc::renderLoop(s, p, 48000, bpm, 4, L, R);
-    float peak = 0;
-    for (size_t i = 0; i < L.size(); ++i) peak = std::max(peak, std::max(std::abs(L[i]), std::abs(R[i])));
-    std::printf("samples %zu  peak %.3f\n", L.size(), peak);
-    writeWav(out, L, R, 48000);
-    // a second version: one link set to END to hear a fresh note
-    s.glide[1][2] = false;
-    rc::renderLoop(s, p, 48000, bpm, 4, L, R);
-    std::string o2 = std::string(out) + ".end.wav";
-    writeWav(o2.c_str(), L, R, 48000);
     return 0;
 }

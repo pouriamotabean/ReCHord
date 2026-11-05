@@ -5,14 +5,6 @@ using APF = juce::AudioParameterFloat;
 using PID = juce::ParameterID;
 
 static juce::String msText(float v, int) { return v >= 1000.f ? juce::String(v / 1000.f, 2) + " s" : juce::String(juce::roundToInt(v)) + " ms"; }
-static juce::String beatText(float b, int)
-{
-    // glide times are in beats; show the familiar note values when they land on one
-    struct N { float b; const char* t; } names[] = { { 0.f, "0" }, { 0.125f, "1/32" }, { 0.25f, "1/16" }, { 0.375f, "3/32" }, { 0.5f, "1/8" },
-                                                    { 0.75f, "3/16" }, { 1.f, "1/4" }, { 1.5f, "3/8" }, { 2.f, "1/2" } };
-    for (auto& n : names) if (std::abs(b - n.b) < 0.012f) return n.t;
-    return juce::String(b, 2) + " b";
-}
 
 juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
 {
@@ -29,21 +21,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
     fl("bright", "Bright", 0.f, 1.f, 0.45f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
     fl("vibrato", "Vibrato", 0.f, 50.f, 16.f, 0, [](float v, int) { return juce::String(juce::roundToInt(v)) + " ct"; });
     fl("release", "Release", 30.f, 3000.f, 380.f, 400.f, msText);
-    // glide: snaps to 1/32-note steps so the musical values are easy to hit
-    p.push_back(std::make_unique<APF>(PID { "early", 1 }, "Glide early", juce::NormalisableRange<float>(0.f, 2.f, 0.03125f), 0.5f,
-                                      juce::AudioParameterFloatAttributes().withStringFromValueFunction(beatText)));
-    p.push_back(std::make_unique<APF>(PID { "late", 1 }, "Glide late", juce::NormalisableRange<float>(0.f, 1.f, 0.03125f), 0.25f,
-                                      juce::AudioParameterFloatAttributes().withStringFromValueFunction(beatText)));
-    fl("curve", "Glide curve", -1.f, 1.f, 0.f, 0, [](float v, int) {
-        return std::abs(v) < 0.04f ? juce::String("smooth") : (v < 0 ? "early " : "late ") + juce::String(juce::roundToInt(std::abs(v) * 100)); });
+    p.push_back(std::make_unique<juce::AudioParameterChoice>(PID { "mode", 1 }, "Glide mode", juce::StringArray { "Smooth", "Steps", "Robot" }, 0));
     fl("spread", "Spread", 0.f, 60.f, 12.f, 0, [](float v, int) { return juce::String(juce::roundToInt(v)) + " ms"; });
+    fl("double", "Double", 0.f, 1.f, 0.f, 0, [](float v, int) { return v < 0.005f ? juce::String("off") : juce::String(juce::roundToInt(v * 100)) + "%"; });
     p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "transpose", 1 }, "Transpose", -12, 12, 0,
         juce::AudioParameterIntAttributes().withStringFromValueFunction([](int v, int) { return (v > 0 ? "+" : "") + juce::String(v); })));
     p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "octave", 1 }, "Register", -2, 2, 0,
         juce::AudioParameterIntAttributes().withStringFromValueFunction([](int v, int) { return v == 0 ? juce::String("mid") : (v > 0 ? "+" : "") + juce::String(v) + " oct"; })));
     p.push_back(std::make_unique<juce::AudioParameterInt>(PID { "voices", 1 }, "Voices", 3, 4, 3));
     fl("volume", "Volume", -30.f, 6.f, -4.f, 0, [](float v, int) { return juce::String(v, 1) + " dB"; });
-    p.push_back(std::make_unique<juce::AudioParameterBool>(PID { "live", 1 }, "Play with Cubase", true));
+    p.push_back(std::make_unique<juce::AudioParameterBool>(PID { "listen", 1 }, "Listen", false));
     return { p.begin(), p.end() };
 }
 
@@ -63,13 +50,18 @@ rc::Params ReChordProcessor::currentParams() const
     p.releaseMs = v("release");
     p.bright = v("bright");
     p.vibratoCents = v("vibrato");
-    p.early = v("early");
-    p.late = v("late");
-    p.curve = v("curve");
+    p.mode = (int) v("mode");
+    p.doubleAmt = v("double");
     p.spreadMs = v("spread");
     p.transpose = (int) v("transpose");
     p.volumeDb = v("volume");
     return p;
+}
+
+juce::String ReChordProcessor::slotName(int i) const
+{
+    const auto& c = pattern.chord[score.key[juce::jlimit(0, score.nSlots - 1, i)]];
+    return rc::chordName(c.root, c.quality, transpose());
 }
 
 void ReChordProcessor::publish()
@@ -86,29 +78,72 @@ void ReChordProcessor::smart()
 {
     lastVoices = (int) apvts.getRawParameterValue("voices")->load();
     lastOctave = (int) apvts.getRawParameterValue("octave")->load();
-    rc::smartVoicing(score, chords, lastVoices, lastOctave);
+    rc::buildScore(score, pattern, lastVoices, lastOctave);
     publish();
 }
 
-void ReChordProcessor::setChord(int bar, int root, int quality)
+void ReChordProcessor::setChord(int key, int root, int quality)
 {
-    chords[bar] = { (root % 12 + 12) % 12, quality };
+    chordFor(key) = { (root % 12 + 12) % 12, quality };
+    if (key >= 0 && key % 2 == 0 && !pattern.split[key / 2]) pattern.chord[key + 1] = pattern.chord[key];   // a later split starts from it
     smart();
 }
 
-bool ReChordProcessor::moveOctave(int bar, int slot, int dir)
+void ReChordProcessor::setSplit(int bar, bool on)
 {
-    const int np = score.pitch[bar][slot] + 12 * dir;
+    pattern.split[bar] = on;
+    if (on) pattern.chord[bar * 2 + 1] = pattern.chord[bar * 2];
+    smart();
+}
+
+void ReChordProcessor::setEnd(int which, int mode)
+{
+    if (mode == rc::Loop) { pattern.entryMode = pattern.exitMode = rc::Loop; }
+    else
+    {
+        if (pattern.exitMode == rc::Loop) { pattern.entryMode = pattern.exitMode = rc::None; }   // leaving the loop: both ends open
+        (which == -1 ? pattern.entryMode : pattern.exitMode) = mode;
+    }
+    smart();
+}
+
+void ReChordProcessor::setTiming(int t, int v, float early, float late, float curve)
+{
+    auto& l = score.linkAt(t, v);
+    l.early = juce::jlimit(0.f, 4.f, early);
+    l.late = juce::jlimit(0.f, 4.f, late);
+    l.curve = juce::jlimit(-1.f, 1.f, curve);
+    score.edited = true;
+    publish();
+}
+
+void ReChordProcessor::timingToAll(int t, int v)
+{
+    const auto src = score.linkAt(t, v);
+    for (int i = -1; i < score.nSlots; ++i)
+        for (int j = 0; j < score.nVoices; ++j)
+        {
+            auto& l = score.linkAt(i, j);
+            l.early = src.early; l.late = src.late; l.curve = src.curve;
+        }
+    score.edited = true;
+    publish();
+}
+
+bool ReChordProcessor::moveOctave(int col, int v, int dir)
+{
+    const int np = score.pitchAt(col, v) + 12 * dir;
     if (np < 28 || np > 103) return false;
-    for (int v = 0; v < score.nVoices; ++v) if (v != slot && score.pitch[bar][v] == np) return false;  // no unisons
-    score.pitch[bar][slot] = np;
+    for (int j = 0; j < score.nVoices; ++j) if (j != v && score.pitchAt(col, j) == np) return false;  // no unisons
+    if (col >= score.nSlots && score.loop()) col = 0;     // the faded copy of chord 1
+    score.pitchAt(col, v) = np;
+    score.edited = true;
     publish();
     return true;
 }
 
 void ReChordProcessor::timerCallback()
 {
-    // voices / register changed (from the UI or automation): new smart voicing, here on the message thread
     const int nv = (int) apvts.getRawParameterValue("voices")->load();
     const int oc = (int) apvts.getRawParameterValue("octave")->load();
     if (nv != lastVoices || oc != lastOctave) smart();
@@ -126,7 +161,6 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     midi.clear();
     const int n = buffer.getNumSamples();
     for (int c = 2; c < buffer.getNumChannels(); ++c) buffer.clear(c, 0, n);
-
     {
         const juce::SpinLock::ScopedTryLockType sl(scoreLock);
         if (sl.isLocked() && scoreDirty) { engine.setScore(audioScore); scoreDirty = false; }
@@ -147,18 +181,18 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     hostBpm = bpm;
     hostBarBeats = barBeats;
 
-    const bool live = apvts.getRawParameterValue("live")->load() > 0.5f;
+    // LISTEN on: with Cubase when it plays, otherwise on its own. Off: silent.
+    const bool listen = apvts.getRawParameterValue("listen")->load() > 0.5f;
     bool playing = false;
     double beat = 0;
-    if (hostPlaying && live) { playing = true; beat = ppq; preview = false; }
-    else if (preview.load() && !hostPlaying)
+    if (listen && hostPlaying) { playing = true; beat = ppq; freeBeat = 0; }
+    else if (listen)
     {
         playing = true;
-        beat = previewBeat;
-        previewBeat += n * bpm / 60.0 / getSampleRate();
-        previewBeat = std::fmod(previewBeat, rc::kBars * barBeats * 12.0);
+        beat = freeBeat;
+        freeBeat = std::fmod(freeBeat + n * bpm / 60.0 / getSampleRate(), rc::kBars * barBeats * 12.0);
     }
-    if (!preview.load()) previewBeat = 0;
+    else freeBeat = 0;
 
     uiBeat = playing ? beat : -1.0;
     engine.process(buffer.getWritePointer(0), buffer.getWritePointer(1), n, playing, beat, bpm, barBeats);
@@ -169,11 +203,10 @@ juce::File ReChordProcessor::renderWav()
     const double sr = getSampleRate() > 8000 ? getSampleRate() : 48000.0;
     const double bpm = hostBpm.load(), barBeats = hostBarBeats.load();
     std::vector<float> L, R;
-    rc::renderLoop(score, currentParams(), sr, bpm, barBeats, L, R);
+    rc::renderPattern(score, currentParams(), sr, bpm, barBeats, L, R);
 
     juce::String names;
-    for (int b = 0; b < rc::kBars; ++b)
-        names << (b ? "-" : "") << juce::String(rc::chordName(chords[b].root, chords[b].quality, transpose())).replace("#", "s");
+    for (int i = 0; i < score.nSlots; ++i) names << (i ? "-" : "") << slotName(i).replace("#", "s");
     auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("ReChord").getChildFile("Renders");
     dir.createDirectory();
     auto f = dir.getNonexistentChildFile("ReChord " + names + " " + juce::String(juce::roundToInt(bpm)) + "bpm", ".wav", false);
@@ -192,30 +225,43 @@ juce::File ReChordProcessor::renderWav()
     return f;
 }
 
+// ---------------- state ----------------
+static juce::String linkText(const rc::Link& l)
+{
+    return juce::String(l.to) + "," + juce::String(l.glide ? 1 : 0) + "," + juce::String(l.early, 4) + "," + juce::String(l.late, 4) + "," + juce::String(l.curve, 4);
+}
+static bool linkFrom(const juce::String& t, rc::Link& l)
+{
+    juce::StringArray a; a.addTokens(t, ",", "");
+    if (a.size() != 5) return false;
+    l.to = a[0].getIntValue(); l.glide = a[1].getIntValue() != 0;
+    l.early = a[2].getFloatValue(); l.late = a[3].getFloatValue(); l.curve = a[4].getFloatValue();
+    return true;
+}
+
 void ReChordProcessor::getStateInformation(juce::MemoryBlock& dest)
 {
     auto st = apvts.copyState();
-    juce::ValueTree m("model");
+    juce::ValueTree m("model2");
     m.setProperty("version", RECHORD_VERSION, nullptr);
+    juce::String chords, split;
+    for (auto& c : pattern.chord) chords << c.root << ":" << c.quality << " ";
+    for (bool b : pattern.split) split << (b ? 1 : 0) << " ";
+    m.setProperty("chords", chords.trim(), nullptr);
+    m.setProperty("split", split.trim(), nullptr);
+    m.setProperty("ends", juce::String(pattern.entryMode) + " " + juce::String(pattern.exitMode) + " " + juce::String(pattern.entry.root) + ":" + juce::String(pattern.entry.quality)
+                          + " " + juce::String(pattern.exit.root) + ":" + juce::String(pattern.exit.quality), nullptr);
     m.setProperty("nVoices", score.nVoices, nullptr);
-    for (int b = 0; b < rc::kBars; ++b)
-    {
-        juce::ValueTree bar("bar");
-        bar.setProperty("root", chords[b].root, nullptr);
-        bar.setProperty("quality", chords[b].quality, nullptr);
-        juce::String pi, pe, gl;
-        for (int v = 0; v < rc::kMaxVoices; ++v)
-        {
-            pi << score.pitch[b][v] << " ";
-            pe << score.perm[b][v] << " ";
-            gl << (score.glide[b][v] ? 1 : 0) << " ";
-        }
-        bar.setProperty("pitch", pi.trim(), nullptr);
-        bar.setProperty("perm", pe.trim(), nullptr);
-        bar.setProperty("glide", gl.trim(), nullptr);
-        m.appendChild(bar, nullptr);
-    }
-    st.removeChild(st.getChildWithName("model"), nullptr);
+    m.setProperty("nSlots", score.nSlots, nullptr);
+    m.setProperty("edited", score.edited, nullptr);
+    juce::String pitches, links;
+    for (int c = -1; c <= score.nSlots; ++c)
+        for (int v = 0; v < rc::kMaxVoices; ++v) pitches << (c < 0 ? score.entryPitch[v] : c >= score.nSlots ? score.exitPitch[v] : score.pitch[c][v]) << " ";
+    for (int t = -1; t < score.nSlots; ++t)
+        for (int v = 0; v < rc::kMaxVoices; ++v) links << linkText(score.linkAt(t, v)) << " ";
+    m.setProperty("pitches", pitches.trim(), nullptr);
+    m.setProperty("links", links.trim(), nullptr);
+    st.removeChild(st.getChildWithName("model2"), nullptr);
     st.appendChild(m, nullptr);
     if (auto xml = st.createXml()) copyXmlToBinary(*xml, dest);
 }
@@ -225,39 +271,60 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
     auto xml = getXmlFromBinary(data, size);
     if (xml == nullptr) return;
     auto st = juce::ValueTree::fromXml(*xml);
-    auto m = st.getChildWithName("model");
+    auto m = st.getChildWithName("model2");
     st.removeChild(m, nullptr);
+    st.removeChild(st.getChildWithName("model"), nullptr);
     apvts.replaceState(st);
-    if (!m.isValid() || m.getNumChildren() != rc::kBars) { smart(); return; }
+    if (!m.isValid()) { smart(); return; }
 
-    rc::Score s;
-    s.nVoices = juce::jlimit(3, rc::kMaxVoices, (int) m.getProperty("nVoices", 3));
-    bool ok = true;
-    for (int b = 0; b < rc::kBars; ++b)
+    juce::StringArray ch, sp, ends;
+    ch.addTokens(m.getProperty("chords").toString(), " ", "");
+    sp.addTokens(m.getProperty("split").toString(), " ", "");
+    ends.addTokens(m.getProperty("ends").toString(), " ", "");
+    auto chordOf = [](const juce::String& s) { return rc::Chord { s.upToFirstOccurrenceOf(":", false, false).getIntValue() % 12,
+                                                                  juce::jlimit(0, rc::kNumQualities - 1, s.fromFirstOccurrenceOf(":", false, false).getIntValue()) }; };
+    if (ch.size() == rc::kBars * 2) for (int i = 0; i < ch.size(); ++i) pattern.chord[i] = chordOf(ch[i]);
+    if (sp.size() == rc::kBars) for (int i = 0; i < rc::kBars; ++i) pattern.split[i] = sp[i].getIntValue() != 0;
+    if (ends.size() == 4)
     {
-        auto bar = m.getChild(b);
-        chords[b] = { (int) bar.getProperty("root", 9), juce::jlimit(0, rc::kNumQualities - 1, (int) bar.getProperty("quality", 0)) };
-        juce::StringArray pi, pe, gl;
-        pi.addTokens(bar.getProperty("pitch").toString(), " ", "");
-        pe.addTokens(bar.getProperty("perm").toString(), " ", "");
-        gl.addTokens(bar.getProperty("glide").toString(), " ", "");
-        if (pi.size() != rc::kMaxVoices || pe.size() != rc::kMaxVoices || gl.size() != rc::kMaxVoices) { ok = false; break; }
-        bool used[rc::kMaxVoices] {};
-        for (int v = 0; v < rc::kMaxVoices; ++v)
+        pattern.entryMode = juce::jlimit(0, 2, ends[0].getIntValue());
+        pattern.exitMode = juce::jlimit(0, 2, ends[1].getIntValue());
+        pattern.entry = chordOf(ends[2]);
+        pattern.exit = chordOf(ends[3]);
+    }
+    smart();   // slots, scale, modes from the pattern; then the saved voicing and links on top
+
+    juce::StringArray pi, li;
+    pi.addTokens(m.getProperty("pitches").toString(), " ", "");
+    li.addTokens(m.getProperty("links").toString(), " ", "");
+    const int nv = (int) m.getProperty("nVoices", 0), ns = (int) m.getProperty("nSlots", 0);
+    if (nv != score.nVoices || ns != score.nSlots || pi.size() != (ns + 2) * rc::kMaxVoices || li.size() != (ns + 1) * rc::kMaxVoices) return;
+
+    rc::Score s = score;
+    int k = 0;
+    for (int c = -1; c <= ns; ++c)
+        for (int v = 0; v < rc::kMaxVoices; ++v, ++k)
         {
-            s.pitch[b][v] = pi[v].getIntValue();
-            s.perm[b][v] = juce::jlimit(0, rc::kMaxVoices - 1, pe[v].getIntValue());
-            s.glide[b][v] = gl[v].getIntValue() != 0;
-            if (v < s.nVoices)
+            const int p = pi[k].getIntValue();
+            if (c < 0) s.entryPitch[v] = p; else if (c >= ns) s.exitPitch[v] = p; else s.pitch[c][v] = p;
+        }
+    k = 0;
+    for (int t = -1; t < ns; ++t)
+    {
+        bool used[rc::kMaxVoices] {};
+        for (int v = 0; v < rc::kMaxVoices; ++v, ++k)
+        {
+            rc::Link l;
+            if (!linkFrom(li[k], l)) return;
+            if (v < nv)
             {
-                if (s.perm[b][v] >= s.nVoices || used[s.perm[b][v]]) ok = false;   // links must stay one-to-one
-                else used[s.perm[b][v]] = true;
+                if (l.to < 0 || l.to >= nv || used[l.to]) return;     // links must stay one-to-one
+                used[l.to] = true;
             }
+            s.linkAt(t, v) = l;
         }
     }
-    lastVoices = (int) apvts.getRawParameterValue("voices")->load();
-    lastOctave = (int) apvts.getRawParameterValue("octave")->load();
-    if (!ok || s.nVoices != lastVoices) { smart(); return; }
+    s.edited = (bool) m.getProperty("edited", false);
     score = s;
     publish();
 }
