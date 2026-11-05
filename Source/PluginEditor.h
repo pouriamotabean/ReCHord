@@ -70,6 +70,148 @@ inline void glow(juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c, fl
     for (int i = 4; i >= 1; --i) { const float e = spread * i / 4.f; g.setColour(c.withAlpha(alpha * 0.18f)); g.fillEllipse(r.expanded(e)); }
 }
 
+// ---------------- 2.0: architectural minimalism on cold, worn metal ----------------
+// a rectangle with its corners cut at 45 degrees (mask: 1 top-left, 2 top-right, 4 bottom-right, 8 bottom-left)
+inline juce::Path chamfer(juce::Rectangle<float> r, float c, int mask = 15)
+{
+    juce::Path p;
+    const float x0 = r.getX(), y0 = r.getY(), x1 = r.getRight(), y1 = r.getBottom();
+    c = std::min(c, std::min(r.getWidth(), r.getHeight()) * 0.45f);
+    p.startNewSubPath((mask & 1) ? x0 + c : x0, y0);
+    if (mask & 2) { p.lineTo(x1 - c, y0); p.lineTo(x1, y0 + c); } else p.lineTo(x1, y0);
+    if (mask & 4) { p.lineTo(x1, y1 - c); p.lineTo(x1 - c, y1); } else p.lineTo(x1, y1);
+    if (mask & 8) { p.lineTo(x0 + c, y1); p.lineTo(x0, y1 - c); } else p.lineTo(x0, y1);
+    if (mask & 1) p.lineTo(x0, y0 + c);
+    p.closeSubPath();
+    return p;
+}
+
+// the metal: grain, horizontal brushing, scratches and pits - the same every time (fixed seed), made once
+inline const juce::Image& metalTexture()
+{
+    static juce::Image img;
+    if (img.isValid()) return img;
+    const int W = 1024, H = 1024;
+    img = juce::Image(juce::Image::ARGB, W, H, true);
+    juce::Random rnd(20261106);
+    std::vector<float> row((size_t) W);
+    {
+        juce::Image::BitmapData bd(img, juce::Image::BitmapData::writeOnly);
+        for (int y = 0; y < H; ++y)
+        {
+            // brushing: each row a slightly different, slowly varying level
+            // a periodic walk (wraps at the tile edge, so the tiling shows no seam)
+            float acc = 0.f;
+            const float rowLevel = (rnd.nextFloat() - 0.5f) * 0.012f;
+            for (int x = 0; x < W + 400; ++x) { acc = acc * 0.985f + (rnd.nextFloat() - 0.5f) * 0.012f; if (x >= 400) row[(size_t) (x - 400)] = acc; }
+            for (int x = 0; x < 64; ++x) { const float t = x / 64.f; row[(size_t) (W - 64 + x)] = row[(size_t) (W - 64 + x)] * (1 - t) + row[0] * t; }
+            for (int x = 0; x < W; ++x)
+            {
+                // stored as a signed deviation: light = white with alpha, dark = black with alpha
+                const float grain = (rnd.nextFloat() - 0.5f) * 0.09f;
+                const float dv = grain + row[(size_t) x] * 0.7f + rowLevel * 2.f;
+                const float al = juce::jlimit(0.f, 1.f, std::abs(dv) * 2.2f);
+                bd.setPixelColour(x, y, (dv > 0 ? juce::Colours::white : juce::Colours::black).withAlpha(al));
+            }
+        }
+    }
+    juce::Graphics g(img);
+    // scratches: thin, light, at all angles but mostly along the brushing; some are arcs
+    for (int i = 0; i < 260; ++i)
+    {
+        const float x = rnd.nextFloat() * W, y = rnd.nextFloat() * H;
+        const float len = 8.f + std::pow(rnd.nextFloat(), 2.f) * 160.f;
+        const float ang = (rnd.nextFloat() < 0.7f ? (rnd.nextFloat() - 0.5f) * 0.35f : rnd.nextFloat() * 3.1416f);
+        const float a = 0.05f + rnd.nextFloat() * 0.12f;
+        juce::Path p;
+        p.startNewSubPath(x, y);
+        const float bend = (rnd.nextFloat() - 0.5f) * len * 0.15f;
+        p.quadraticTo(x + std::cos(ang) * len * 0.5f - std::sin(ang) * bend, y + std::sin(ang) * len * 0.5f + std::cos(ang) * bend,
+                      x + std::cos(ang) * len, y + std::sin(ang) * len);
+        g.setColour(juce::Colours::white.withAlpha(a));
+        g.strokePath(p, juce::PathStrokeType(0.6f + rnd.nextFloat() * 0.5f));
+        g.setColour(juce::Colours::black.withAlpha(a * 0.8f));
+        g.strokePath(p, juce::PathStrokeType(0.5f), juce::AffineTransform::translation(0.6f, 0.8f));
+    }
+    // pits and stains
+    for (int i = 0; i < 900; ++i)
+    {
+        const float x = rnd.nextFloat() * W, y = rnd.nextFloat() * H, r = 0.4f + rnd.nextFloat() * 1.3f;
+        g.setColour((rnd.nextFloat() < 0.5f ? juce::Colours::black : juce::Colours::white).withAlpha(0.05f + rnd.nextFloat() * 0.08f));
+        g.fillEllipse(x - r, y - r, r * 2, r * 2);
+    }
+    for (int i = 0; i < 18; ++i)
+    {
+        const float x = rnd.nextFloat() * W, y = rnd.nextFloat() * H, r = 30.f + rnd.nextFloat() * 120.f;
+        juce::ColourGradient cg(juce::Colours::black.withAlpha(0.06f), x, y, juce::Colours::transparentBlack, x + r, y, true);
+        g.setGradientFill(cg); g.fillEllipse(x - r, y - r, r * 2, r * 2);
+    }
+    return img;
+}
+
+// fill a shape with the metal at a given darkness (base colour) - the texture only modulates it
+inline void fillMetal(juce::Graphics& g, const juce::Path& p, juce::Colour base, float texture = 0.55f)
+{
+    g.setColour(base); g.fillPath(p);
+    g.saveState();
+    g.reduceClipRegion(p);
+    g.setTiledImageFill(metalTexture(), 0, 0, texture);
+    g.fillPath(p);
+    g.restoreState();
+}
+
+// a panel: raised (frames, cards) or recessed (screens). Light comes from the top
+inline void panel(juce::Graphics& g, juce::Rectangle<float> r, float cut, juce::Colour base, bool recessed, int mask = 15)
+{
+    auto p = chamfer(r, cut, mask);
+    if (!recessed)
+    {
+        g.setColour(juce::Colours::black.withAlpha(0.45f));
+        g.fillPath(chamfer(r.translated(0, 3.f).expanded(1.f), cut, mask));
+    }
+    fillMetal(g, p, base, recessed ? 0.35f : 0.75f);
+    if (recessed)
+    {
+        // inner shadow at the top, a hairline of light at the bottom edge
+        juce::ColourGradient sh(juce::Colours::black.withAlpha(0.55f), 0, r.getY(), juce::Colours::transparentBlack, 0, r.getY() + 14.f, false);
+        g.saveState(); g.reduceClipRegion(p); g.setGradientFill(sh); g.fillRect(r.withHeight(14.f)); g.restoreState();
+        g.setColour(juce::Colours::black.withAlpha(0.8f)); g.strokePath(p, juce::PathStrokeType(1.2f));
+        g.setColour(juce::Colours::white.withAlpha(0.05f));
+        g.drawLine(r.getX() + cut, r.getBottom() + 0.8f, r.getRight() - cut, r.getBottom() + 0.8f, 1.f);
+    }
+    else
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.075f));
+        g.strokePath(chamfer(r.reduced(0.5f), cut, mask), juce::PathStrokeType(1.f));
+        g.setColour(juce::Colours::white.withAlpha(0.06f));
+        g.drawLine(r.getX() + cut, r.getY() + 1.f, r.getRight() - cut, r.getY() + 1.f, 1.f);
+    }
+}
+
+// a screw: recessed hole, worn cap, a cross slot turned a little differently each time
+inline void screw(juce::Graphics& g, juce::Point<float> c, float rad, float angle)
+{
+    g.setColour(juce::Colours::black.withAlpha(0.7f)); g.fillEllipse(juce::Rectangle<float>(rad * 2 + 2.f, rad * 2 + 2.f).withCentre(c));
+    juce::ColourGradient cg(juce::Colour(0xff4a4a4d), c.x - rad * 0.5f, c.y - rad * 0.6f, juce::Colour(0xff161618), c.x + rad * 0.6f, c.y + rad * 0.8f, true);
+    g.setGradientFill(cg); g.fillEllipse(juce::Rectangle<float>(rad * 2, rad * 2).withCentre(c));
+    g.setColour(juce::Colours::white.withAlpha(0.12f)); g.drawEllipse(juce::Rectangle<float>(rad * 2 - 1.f, rad * 2 - 1.f).withCentre(c), 0.7f);
+    juce::Path slot;
+    slot.addRectangle(-rad * 0.7f, -0.6f, rad * 1.4f, 1.2f);
+    slot.addRectangle(-0.6f, -rad * 0.7f, 1.2f, rad * 1.4f);
+    g.setColour(juce::Colours::black.withAlpha(0.85f));
+    g.fillPath(slot, juce::AffineTransform::rotation(angle).translated(c.x, c.y));
+    g.setColour(juce::Colours::white.withAlpha(0.08f));
+    g.fillPath(slot, juce::AffineTransform::rotation(angle).translated(c.x + 0.5f, c.y + 0.6f));
+}
+
+// a small chamfered chip (buttons, segments): metal, darker when off
+inline void chipShape(juce::Graphics& g, juce::Rectangle<float> r, bool on, bool hot, float cut = 5.f)
+{
+    auto p = chamfer(r, cut, 2 | 8);
+    fillMetal(g, p, on ? juce::Colour(0xff2b2b2e) : hot ? juce::Colour(0xff222225) : juce::Colour(0xff17171a), 0.35f);
+    g.setColour(juce::Colours::white.withAlpha(on ? 0.12f : 0.06f)); g.strokePath(p, juce::PathStrokeType(1.f));
+}
+
 struct Look : juce::LookAndFeel_V4
 {
     Look()
@@ -81,35 +223,62 @@ struct Look : juce::LookAndFeel_V4
     void drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, juce::Slider& s) override
     {
         const auto b = juce::Rectangle<float>((float) x, (float) y, (float) w, (float) h);
-        const float d = std::min(b.getWidth(), b.getHeight()) - 10.f, r = d * 0.5f;
+        const float d = std::min(b.getWidth(), b.getHeight()) - 14.f, r = d * 0.5f;
         const auto c = b.getCentre();
         const float ang = a0 + pos * (a1 - a0);
-        // the travel: a thin ring, the set part in orange
-        juce::Path track; track.addCentredArc(c.x, c.y, r + 4.f, r + 4.f, 0.f, a0, a1, true);
-        g.setColour(line); g.strokePath(track, juce::PathStrokeType(1.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        // the scale: ticks around, the set part in orange
+        for (int t = 0; t <= 10; ++t)
+        {
+            const float ta = a0 + (a1 - a0) * t / 10.f;
+            const float r0 = r + 4.f, r1 = r + ((t % 5 == 0) ? 7.5f : 6.f);
+            g.setColour(line.brighter(0.15f));
+            g.drawLine(c.x + std::sin(ta) * r0, c.y - std::cos(ta) * r0, c.x + std::sin(ta) * r1, c.y - std::cos(ta) * r1, 1.f);
+        }
         const bool bip = (bool) s.getProperties()["bipolar"];
         const float from = bip ? (a0 + a1) * 0.5f : a0;
         if (std::abs(ang - from) > 0.01f)
         {
-            juce::Path v; v.addCentredArc(c.x, c.y, r + 4.f, r + 4.f, 0.f, std::min(from, ang), std::max(from, ang), true);
+            juce::Path v; v.addCentredArc(c.x, c.y, r + 2.5f, r + 2.5f, 0.f, std::min(from, ang), std::max(from, ang), true);
             g.setColour(orange.withAlpha(s.isMouseOverOrDragging() ? 1.f : 0.85f));
-            g.strokePath(v, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            g.strokePath(v, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::butt));
         }
-        juce::Path cap; cap.addEllipse(c.x - r, c.y - r, d, d);
-        shadow(g, cap.getBounds(), r, 0.7f, r * 0.2f, r * 0.12f, true);
-        juce::ColourGradient gr(juce::Colour(0xff3c3c3f), c.x - r * 0.28f, c.y - r * 0.44f, juce::Colour(0xff19191b), c.x + r * 0.7f, c.y + r * 0.9f, true);
-        gr.addColour(0.55, juce::Colour(0xff242427));
-        g.setGradientFill(gr); g.fillPath(cap);
-        g.setColour(juce::Colours::white.withAlpha(0.07f)); g.drawEllipse(c.x - r + 1.f, c.y - r + 1.f, d - 2.f, d - 2.f, 1.f);
-        juce::Path m; m.addRoundedRectangle(-1.6f, -r + 5.f, 3.2f, r * 0.42f, 1.6f);
-        g.setColour(white); g.fillPath(m, juce::AffineTransform::rotation(ang).translated(c.x, c.y));
+        // the skirt: knurled
+        shadow(g, juce::Rectangle<float>(d, d).withCentre(c), r, 0.8f, r * 0.22f, r * 0.14f, true);
+        juce::ColourGradient sk(juce::Colour(0xff36363a), c.x - r * 0.4f, c.y - r * 0.7f, juce::Colour(0xff0f0f11), c.x + r * 0.5f, c.y + r, true);
+        g.setGradientFill(sk); g.fillEllipse(juce::Rectangle<float>(d, d).withCentre(c));
+        juce::Path knurl;
+        const int teeth = 40;
+        for (int k = 0; k < teeth; ++k)
+        {
+            const float ka = (float) k / teeth * 6.2831853f;
+            knurl.startNewSubPath(c.x + std::sin(ka) * (r - 3.2f), c.y - std::cos(ka) * (r - 3.2f));
+            knurl.lineTo(c.x + std::sin(ka) * (r - 0.4f), c.y - std::cos(ka) * (r - 0.4f));
+        }
+        g.setColour(juce::Colours::black.withAlpha(0.6f)); g.strokePath(knurl, juce::PathStrokeType(1.f));
+        g.setColour(juce::Colours::white.withAlpha(0.05f)); g.strokePath(knurl, juce::PathStrokeType(0.6f), juce::AffineTransform::rotation(0.035f, c.x, c.y));
+        // the cap: a chamfered top (bevel ring), brushed in circles
+        const float rc = r * 0.74f;
+        juce::ColourGradient bev(juce::Colour(0xff4d4d52), c.x - rc, c.y - rc, juce::Colour(0xff121214), c.x + rc, c.y + rc, false);
+        g.setGradientFill(bev); g.fillEllipse(juce::Rectangle<float>(rc * 2 + 3.f, rc * 2 + 3.f).withCentre(c));
+        juce::ColourGradient top(juce::Colour(0xff2c2c30), c.x, c.y - rc, juce::Colour(0xff1a1a1d), c.x, c.y + rc, false);
+        g.setGradientFill(top); g.fillEllipse(juce::Rectangle<float>(rc * 2 - 1.f, rc * 2 - 1.f).withCentre(c));
+        for (float rr = rc * 0.25f; rr < rc - 1.f; rr += 1.6f)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.018f));
+            g.drawEllipse(juce::Rectangle<float>(rr * 2, rr * 2).withCentre(c), 0.5f);
+        }
+        // the mark
+        const float m0 = rc * 0.25f, m1 = r - 1.f;
+        juce::Path mk; mk.startNewSubPath(0, -m0); mk.lineTo(0, -m1);
+        g.setColour(orange.withAlpha(0.35f));
+        g.strokePath(mk, juce::PathStrokeType(4.f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), juce::AffineTransform::rotation(ang).translated(c.x, c.y));
+        g.setColour(orange);
+        g.strokePath(mk, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), juce::AffineTransform::rotation(ang).translated(c.x, c.y));
     }
     void drawButtonBackground(juce::Graphics& g, juce::Button& b, const juce::Colour&, bool over, bool down) override
     {
         auto r = b.getLocalBounds().toFloat().reduced(0.5f);
-        const float rad = std::min(9.f, r.getHeight() * 0.5f);
-        juce::Colour bg = b.getToggleState() ? chipOn : chip2;
-        g.setColour(bg.brighter(over ? (down ? 0.15f : 0.07f) : 0.f)); g.fillRoundedRectangle(r, rad);
+        chipShape(g, r, b.getToggleState() || down, over, std::min(7.f, r.getHeight() * 0.3f));
         if (b.getToggleState())
         {
             g.setColour(orange); g.fillEllipse(r.getX() + 11.f, r.getCentreY() - 3.f, 6.f, 6.f);   // lit
@@ -162,15 +331,13 @@ public:
     {
         using namespace ui;
         const auto r = getLocalBounds().toFloat();
-        shadow(g, r, 14.f, 0.8f, 6.f, 8.f);
-        g.setColour(screen); g.fillRoundedRectangle(r, 14.f);
-        g.setColour(juce::Colours::white.withAlpha(0.04f)); g.drawRoundedRectangle(r.reduced(0.5f), 14.f, 1.f);
+        panel(g, r.reduced(1.f), 12.f, screen, true);
         layout();
         const auto& s = proc.score;
         const int N = s.nVoices, n = s.nSlots, tr = proc.shift();
 
         g.saveState();
-        g.reduceClipRegion(getLocalBounds().reduced(1));
+        g.reduceClipRegion(chamfer(r.reduced(2.f), 11.f));
 
         // playing slot + playhead
         const double beat = proc.uiBeat.load();
@@ -221,7 +388,7 @@ public:
             const auto rr = navRect(side);
             if (nav)
             {
-                g.setColour(navHot == side ? chipOn : chip2); g.fillRoundedRectangle(rr, 7.f);
+                chipShape(g, rr, navHot == side, false, 5.f);
                 g.setColour(navHot == side ? white : orange);
             }
             else g.setColour(faint);
@@ -723,9 +890,12 @@ public:
                 const int key = b * 2 + h;
                 const auto r = cell(key);
                 const bool isOpen = open == key, hot = hover == key;
-                g.setColour(!on ? chip : isOpen ? chipOn : hot ? chip2.brighter(0.05f) : here ? chip2 : chip2.darker(0.25f));
-                g.fillRoundedRectangle(r, 10.f);
-                if (isOpen) { g.setColour(orange); g.drawRoundedRectangle(r.reduced(0.5f), 10.f, 1.2f); }
+                const int m = (sp ? (h == 0 ? 1 | 8 : 2 | 4) : 15);
+                const auto cp = chamfer(r, 8.f, m);
+                fillMetal(g, cp, !on ? juce::Colour(0xff0e0e10) : isOpen ? juce::Colour(0xff2a2a2e) : hot ? juce::Colour(0xff232326) : here ? juce::Colour(0xff1d1d20) : juce::Colour(0xff151517), on ? 0.7f : 0.4f);
+                g.setColour(juce::Colours::white.withAlpha(on ? 0.07f : 0.03f)); g.strokePath(cp, juce::PathStrokeType(1.f));
+                if (isOpen) { g.setColour(orange); g.strokePath(chamfer(r.reduced(0.5f), 8.f, m), juce::PathStrokeType(1.2f)); }
+                else if (on && here) { g.setColour(orange.withAlpha(0.55f)); g.fillRect(r.getX() + 10.f, r.getBottom() - 3.f, std::min(18.f, r.getWidth() * 0.3f), 1.5f); }
                 g.setColour(!on ? faint.withAlpha(0.6f) : here ? white : soft);
                 g.setFont(inter(sp ? 14.f : 16.5f, 500));
                 g.drawText(label(key), r.withTrimmedLeft(sp && h == 1 ? 0.f : 14.f), juce::Justification::centred);
@@ -735,7 +905,7 @@ public:
             g.setColour(hover == 200 + b ? white : on ? orange : faint);
             if (on) g.fillEllipse(d.reduced(2.f)); else g.drawEllipse(d.reduced(2.5f), 1.3f);
             g.setColour(on ? (here ? dim : faint) : faint.withAlpha(0.7f)); g.setFont(mono(7.5f, true));
-            g.drawText(juce::String(b + 1), d.translated(0.f, 12.f), juce::Justification::centred);
+            g.drawText(juce::String(b + 1).paddedLeft('0', 2), d.translated(1.f, 12.f).withWidth(16.f), juce::Justification::centredLeft);
             // split corner
             if (on)
             {
@@ -749,9 +919,8 @@ public:
         {
             const auto r = cell(which);
             const bool isOpen = open == which, hot = hover == which;
-            g.setColour(isOpen ? chipOn : hot ? chip2 : chip);
-            g.fillRoundedRectangle(r, 10.f);
-            g.setColour(isOpen ? orange : line); g.drawRoundedRectangle(r.reduced(0.5f), 10.f, 1.f);
+            panel(g, r, 8.f, isOpen ? juce::Colour(0xff222225) : hot ? juce::Colour(0xff151518) : juce::Colour(0xff0a0a0b), true);
+            if (isOpen) { g.setColour(orange); g.strokePath(chamfer(r.reduced(0.5f), 8.f), juce::PathStrokeType(1.2f)); }
             const auto& sc = proc.score;
             const int m = which == -1 ? sc.entryMode : sc.exitMode;
             const auto& c = which == -1 ? proc.pattern.entry : proc.pattern.exit;
@@ -828,9 +997,8 @@ public:
     {
         using namespace ui;
         const auto r = getLocalBounds().toFloat();
-        shadow(g, r, 14.f, 0.9f, 6.f, 10.f);
-        g.setColour(card); g.fillRoundedRectangle(r, 14.f);
-        g.setColour(line); g.drawRoundedRectangle(r.reduced(0.5f), 14.f, 1.f);
+        panel(g, r.reduced(1.f), 12.f, juce::Colour(0xff161618), false);
+        for (auto c : { juce::Point<float>(12.f, r.getBottom() - 12.f), juce::Point<float>(r.getRight() - 12.f, r.getBottom() - 12.f) }) screw(g, c, 3.5f, c.x * 0.13f);
         g.setColour(dim); g.setFont(mono(9.f, true));
         const bool end = key < 0;
         const juce::String title = key == -1 ? juce::String("BEFORE THE PATTERN") : key == -2 ? juce::String("AFTER THE PATTERN")
@@ -882,8 +1050,8 @@ private:
     void chipDraw(juce::Graphics& g, juce::Rectangle<float> r, const juce::String& t, bool on, bool hot) const
     {
         using namespace ui;
-        g.setColour(on ? orange : hot ? chipOn : chip2);
-        g.fillRoundedRectangle(r, 8.f);
+        if (on) { g.setColour(orange); g.fillPath(chamfer(r, 6.f, 2 | 8)); }
+        else chipShape(g, r, hot, false, 6.f);
         g.setColour(on ? juce::Colours::white : hot ? white : soft);
         g.setFont(inter(12.f, on ? 600 : 500));
         g.drawText(t, r, juce::Justification::centred);
@@ -926,9 +1094,8 @@ public:
         for (int i = 0; i < 3; ++i)
         {
             const auto r = seg(i);
-            g.setColour(m == i ? chipOn : hover == i ? chip2.brighter(0.05f) : chip2);
-            g.fillRoundedRectangle(r, 9.f);
-            if (m == i) { g.setColour(orange); g.fillEllipse(r.getX() + 12.f, r.getCentreY() - 3.f, 6.f, 6.f); }
+            chipShape(g, r, m == i, hover == i, 4.f);
+            if (m == i) { g.setColour(orange); g.fillRect(r.getX() + 10.f, r.getCentreY() - 2.5f, 5.f, 5.f); }
             g.setColour(m == i ? white : soft); g.setFont(mono(9.5f, true));
             g.drawText(names[i], r.withTrimmedLeft(m == i ? 14.f : 0.f), juce::Justification::centred);
         }
@@ -1000,15 +1167,14 @@ public:
         using namespace ui;
         const int m = (int) proc.apvts.getRawParameterValue("osc")->load();
         const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE", "TINE", "SINE", "KEYS", "BOWED", "808" };
-        g.setColour(chip); g.fillRoundedRectangle(getLocalBounds().toFloat(), 10.f);
+        panel(g, getLocalBounds().toFloat().reduced(0.5f), 7.f, juce::Colour(0xff0a0a0b), true);
         for (int i = 0; i < 9; ++i)
         {
-            const auto r = seg(i);
-            if (m == i) { g.setColour(chipOn); g.fillRoundedRectangle(r, 8.f); }
-            else if (hover == i) { g.setColour(chip2); g.fillRoundedRectangle(r, 8.f); }
+            const auto r = seg(i).reduced(1.f);
+            if (m == i || hover == i) chipShape(g, r, m == i, hover == i, 3.f);
             g.setColour(m == i ? white : soft); g.setFont(mono(7.5f, true));
             g.drawText(names[i], r.withTrimmedLeft(m == i ? 6.f : 0.f), juce::Justification::centred);
-            if (m == i) { g.setColour(orange); g.fillEllipse(r.getX() + 4.f, r.getCentreY() - 2.f, 4.f, 4.f); }
+            if (m == i) { g.setColour(orange); g.fillRect(r.getX() + 4.f, r.getCentreY() - 2.f, 4.f, 4.f); }
         }
     }
     void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < 9; ++i) if (seg(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
@@ -1045,7 +1211,7 @@ public:
     {
         using namespace ui;
         const auto r = getLocalBounds().toFloat();
-        g.setColour(chip2); g.fillRoundedRectangle(r, 10.f);
+        panel(g, r.reduced(0.5f), 7.f, juce::Colour(0xff0a0a0b), true);
         for (int k : { 0, 2 })
         {
             const auto a = arrow(k);
@@ -1090,9 +1256,8 @@ public:
     {
         using namespace ui;
         const auto r = getLocalBounds().toFloat();
-        shadow(g, r, 14.f, 0.9f, 6.f, 10.f);
-        g.setColour(card); g.fillRoundedRectangle(r, 14.f);
-        g.setColour(line); g.drawRoundedRectangle(r.reduced(0.5f), 14.f, 1.f);
+        panel(g, r.reduced(1.f), 12.f, juce::Colour(0xff161618), false);
+        for (auto c : { juce::Point<float>(12.f, r.getBottom() - 12.f), juce::Point<float>(r.getRight() - 12.f, r.getBottom() - 12.f) }) screw(g, c, 3.5f, c.x * 0.13f);
         g.setColour(dim); g.setFont(mono(9.f, true));
         g.drawText("SOUNDS", juce::Rectangle<float>(18.f, 12.f, 100.f, 14.f), juce::Justification::centredLeft);
         g.setColour(faint); g.setFont(mono(8.5f));
@@ -1101,9 +1266,8 @@ public:
         {
             const auto rr = tabCell(t);
             const bool on = tab == t, hot = hover == 300 + t, cur = groupOf(proc.presetIndex) == t;
-            g.setColour(on ? chipOn : hot ? chip2.brighter(0.05f) : chip2);
-            g.fillRoundedRectangle(rr, 8.f);
-            if (cur) { g.setColour(orange); g.fillEllipse(rr.getX() + 8.f, rr.getCentreY() - 2.5f, 5.f, 5.f); }
+            chipShape(g, rr, on, hot, 5.f);
+            if (cur) { g.setColour(orange); g.fillRect(rr.getX() + 8.f, rr.getCentreY() - 2.5f, 5.f, 5.f); }
             g.setColour(on ? white : soft); g.setFont(mono(9.f, true));
             g.drawText(groupName(t), rr.withTrimmedLeft(cur ? 8.f : 0.f), juce::Justification::centred);
         }
@@ -1112,8 +1276,8 @@ public:
             if (groupOf(i) != tab) continue;
             const auto cell = item(i);
             const bool on = proc.presetIndex == i, hot = hover == i;
-            g.setColour(on ? orange : hot ? chipOn : chip2);
-            g.fillRoundedRectangle(cell, 8.f);
+            if (on) { g.setColour(orange); g.fillPath(chamfer(cell, 7.f, 2 | 8)); }
+            else chipShape(g, cell, hot, false, 7.f);
             g.setColour(on ? juce::Colours::white : hot ? white : soft);
             g.setFont(inter(12.5f, on ? 600 : 500));
             g.drawText(rc::kPresets[i].name, cell.reduced(14.f, 0.f), juce::Justification::centredLeft);
@@ -1168,9 +1332,17 @@ public:
         using namespace ui;
         const auto r = getLocalBounds().toFloat().reduced(1.f);
         glow(g, juce::Rectangle<float>(r.getWidth() * 0.6f, 10.f).withCentre(r.getCentre().translated(0, 10)), orange, hot ? 0.5f : 0.3f, 10.f);
-        juce::ColourGradient gr(juce::Colour(0xffff7b47), r.getX(), r.getY(), juce::Colour(0xffe2490f), r.getX(), r.getBottom(), false);
-        g.setGradientFill(gr); g.fillRoundedRectangle(r, 11.f);
-        g.setColour(juce::Colours::white.withAlpha(0.25f)); g.drawRoundedRectangle(r.reduced(0.5f), 11.f, 1.f);
+        juce::Path slab;
+        slab.startNewSubPath(r.getX() + 12.f, r.getY()); slab.lineTo(r.getRight(), r.getY());
+        slab.lineTo(r.getRight(), r.getBottom() - 8.f); slab.lineTo(r.getRight() - 8.f, r.getBottom());
+        slab.lineTo(r.getX(), r.getBottom()); slab.lineTo(r.getX(), r.getY() + 12.f); slab.closeSubPath();
+        juce::ColourGradient gr(juce::Colour(hot ? 0xffff8550 : 0xffff7340), r.getX(), r.getY(), juce::Colour(0xffd9440c), r.getX(), r.getBottom(), false);
+        g.setGradientFill(gr); g.fillPath(slab);
+        g.saveState(); g.reduceClipRegion(slab); g.setTiledImageFill(metalTexture(), 0, 0, 0.35f); g.fillPath(slab); g.restoreState();
+        g.setColour(juce::Colours::white.withAlpha(0.3f)); g.drawLine(r.getX() + 12.f, r.getY() + 0.8f, r.getRight() - 1.f, r.getY() + 0.8f, 1.f);
+        g.setColour(juce::Colours::black.withAlpha(0.35f)); g.strokePath(slab, juce::PathStrokeType(1.f));
+        g.setColour(juce::Colours::black.withAlpha(0.22f));
+        for (int k = 0; k < 4; ++k) { const float gx = r.getRight() - 30.f + k * 5.f; g.drawLine(gx, r.getBottom() - 9.f, gx + 7.f, r.getY() + 9.f, 1.2f); }
         // arrow
         const float ax = r.getX() + 20.f, ay = r.getCentreY();
         juce::Path a; a.startNewSubPath(ax, ay - 8.f); a.lineTo(ax, ay + 6.f);
@@ -1226,8 +1398,8 @@ public:
         for (int i = 0; i < 3; ++i)
         {
             const auto r = cell(i);
-            if (current == i) { g.setColour(chipOn); g.fillRoundedRectangle(r, 9.f); g.setColour(orange); g.fillRoundedRectangle(r.getX() + 3.f, r.getY() + 9.f, 2.5f, r.getHeight() - 18.f, 1.2f); }
-            else if (hover == i) { g.setColour(chip2); g.fillRoundedRectangle(r, 9.f); }
+            if (current == i || hover == i) chipShape(g, r, current == i, hover == i, 6.f);
+            if (current == i) { g.setColour(orange); g.fillRect(r.getX() + 4.f, r.getY() + 9.f, 2.5f, r.getHeight() - 18.f); }
             g.setColour(current == i ? white : soft); g.setFont(mono(10.f, true));
             g.drawText(names[i], r.withTrimmedLeft(16.f), juce::Justification::centredLeft);
         }
@@ -1369,20 +1541,37 @@ public:
     void paint(juce::Graphics& g) override
     {
         using namespace ui;
-        g.fillAll(body);
-        juce::ColourGradient sheen(juce::Colour(0xff151517), 0.f, 0.f, body, 0.f, 220.f, false);
-        g.setGradientFill(sheen); g.fillRect(getLocalBounds().removeFromTop(220));
-        g.setColour(white); g.setFont(inter(22.f, 600, -0.02f));
-        g.drawText("ReChord", juce::Rectangle<float>(28.f, 12.f, 140.f, 28.f), juce::Justification::centredLeft);
-        g.setColour(orange); g.fillEllipse(124.f, 21.f, 6.f, 6.f);
+        const auto all = getLocalBounds().toFloat();
+        // the body: dark worn metal, light from the top, darker at the edges
+        { juce::Path bp; bp.addRectangle(all); fillMetal(g, bp, juce::Colour(0xff121214), 0.7f); }
+        juce::ColourGradient sheen(juce::Colours::white.withAlpha(0.045f), 480.f, -80.f, juce::Colours::transparentWhite, 480.f, 420.f, true);
+        g.setGradientFill(sheen); g.fillRect(all);
+        juce::ColourGradient vig(juce::Colours::transparentBlack, 480.f, 300.f, juce::Colours::black.withAlpha(0.45f), 0.f, 0.f, true);
+        g.setGradientFill(vig); g.fillRect(all);
+        // a machined seam under the header
+        g.setColour(juce::Colours::black.withAlpha(0.7f)); g.drawHorizontalLine(64, 0.f, 960.f);
+        g.setColour(juce::Colours::white.withAlpha(0.05f)); g.drawHorizontalLine(65, 0.f, 960.f);
+        screw(g, { 10.f, 10.f }, 4.f, 0.4f);  screw(g, { 950.f, 10.f }, 4.f, 1.1f);
+        screw(g, { 10.f, 590.f }, 4.f, 2.2f); screw(g, { 950.f, 590.f }, 4.f, 0.8f);
+        // the mark: three lines gliding
+        {
+            juce::Path m;
+            const float ys[3][2] = { { 20.f, 26.f }, { 26.f, 32.f }, { 32.f, 22.f } };
+            for (auto& y : ys) { m.startNewSubPath(28.f, y[0]); m.lineTo(32.f, y[0]); m.cubicTo(37.f, y[0], 37.f, y[1], 42.f, y[1]); m.lineTo(46.f, y[1]); }
+            g.setColour(white.withAlpha(0.85f)); g.strokePath(m, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            g.setColour(orange); g.fillRect(45.f, 20.5f, 3.f, 3.f);
+        }
+        g.setColour(white); g.setFont(inter(21.f, 600, -0.02f));
+        g.drawText("ReChord", juce::Rectangle<float>(54.f, 12.f, 140.f, 28.f), juce::Justification::centredLeft);
         g.setColour(faint); g.setFont(mono(7.5f));
-        g.drawText(U("BY POURIA MOTABEAN · v" RECHORD_VERSION), juce::Rectangle<float>(29.f, 40.f, 200.f, 12.f), juce::Justification::centredLeft);
-        // the knob panel
-        const auto panel = juce::Rectangle<float>(24.f, 462.f, 912.f, 124.f);
-        shadow(g, panel, 14.f, 0.6f, 4.f, 6.f);
-        g.setColour(card); g.fillRoundedRectangle(panel, 14.f);
-        g.setColour(juce::Colours::white.withAlpha(0.04f)); g.drawRoundedRectangle(panel.reduced(0.5f), 14.f, 1.f);
-        g.setColour(line); g.drawVerticalLine(140, panel.getY() + 12.f, panel.getBottom() - 12.f);
+        g.drawText(U("BY POURIA MOTABEAN · v" RECHORD_VERSION), juce::Rectangle<float>(55.f, 40.f, 140.f, 12.f), juce::Justification::centredLeft);
+        // the knob plate: raised, chamfered, its own screws
+        const auto plate = juce::Rectangle<float>(24.f, 462.f, 912.f, 124.f);
+        panel(g, plate, 12.f, juce::Colour(0xff19191c), false);
+        screw(g, { plate.getRight() - 12.f, plate.getY() + 12.f }, 3.2f, 0.3f);
+        screw(g, { plate.getRight() - 12.f, plate.getBottom() - 12.f }, 3.2f, 1.7f);
+        g.setColour(juce::Colours::black.withAlpha(0.6f)); g.drawVerticalLine(140, plate.getY() + 12.f, plate.getBottom() - 12.f);
+        g.setColour(juce::Colours::white.withAlpha(0.05f)); g.drawVerticalLine(141, plate.getY() + 12.f, plate.getBottom() - 12.f);
         if (tabs.current == 1)
         {
             g.setColour(faint); g.setFont(mono(8.5f));
