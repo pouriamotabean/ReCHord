@@ -1656,12 +1656,13 @@ private:
         ask->addTextEditor("name", def);
         ask->addButton("SAVE", 1, juce::KeyPress(juce::KeyPress::returnKey));
         ask->addButton("CANCEL", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-        ask->enterModalState(true, juce::ModalCallbackFunction::create([this](int r)
+        juce::Component::SafePointer<PresetPanel> safe(this);
+        ask->enterModalState(true, juce::ModalCallbackFunction::create([this, safe](int r)
         {
             if (r == 1 && ask != nullptr) proc.saveUserPreset(ask->getTextEditorContents("name"));
             files = ReChordProcessor::userPresets();
             repaint();
-            juce::MessageManager::callAsync([sp = juce::Component::SafePointer<PresetPanel>(this)] { if (sp != nullptr) sp->ask.reset(); });
+            juce::MessageManager::callAsync([safe] { if (safe != nullptr) safe->ask.reset(); });
         }), false);
     }
     juce::Rectangle<float> slot(int i) const
