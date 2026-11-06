@@ -1709,11 +1709,12 @@ private:
         ask->addButton("SAVE", 1, juce::KeyPress(juce::KeyPress::returnKey));
         ask->addButton("CANCEL", 0, juce::KeyPress(juce::KeyPress::escapeKey));
         juce::Component::SafePointer<PresetPanel> safe(this);
-        ask->enterModalState(true, juce::ModalCallbackFunction::create([this, safe](int r)
+        ask->enterModalState(true, juce::ModalCallbackFunction::create([safe](int r)
         {
-            if (r == 1 && ask != nullptr) proc.saveUserPreset(ask->getTextEditorContents("name"));
-            files = ReChordProcessor::userPresets();
-            repaint();
+            if (safe == nullptr) return;                     // the window was closed with the dialog open
+            if (r == 1 && safe->ask != nullptr) safe->proc.saveUserPreset(safe->ask->getTextEditorContents("name"));
+            safe->files = ReChordProcessor::userPresets();
+            safe->repaint();
             juce::MessageManager::callAsync([safe] { if (safe != nullptr) safe->ask.reset(); });
         }), false);
     }
@@ -2109,12 +2110,13 @@ private:
     {
         chooser = std::make_unique<juce::FileChooser>("Sustained notes for SAMPLE (one or several)", juce::File(), "*.wav;*.aif;*.aiff;*.flac");
         chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
-                             [this](const juce::FileChooser& fc)
+                             [safe = juce::Component::SafePointer<Device>(this)](const juce::FileChooser& fc)
                              {
+                                 if (safe == nullptr) return;
                                  juce::StringArray paths;
                                  for (auto& f : fc.getResults()) paths.add(f.getFullPathName());
-                                 if (!paths.isEmpty() && proc.loadSamples(paths) > 0) showSample = true;
-                                 refresh();
+                                 if (!paths.isEmpty() && safe->proc.loadSamples(paths) > 0) safe->showSample = true;
+                                 safe->refresh();
                              });
     }
     ChordStrip strip;

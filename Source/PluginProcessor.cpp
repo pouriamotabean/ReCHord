@@ -257,6 +257,11 @@ void ReChordProcessor::timerCallback()
         else if (std::abs(c - builtLoop) > 0.004f && now - charAt > 300.0) rebuildSamples();
     }
     if (editPending && juce::Time::getMillisecondCounterHiRes() - editAt > 120.0) { editPending = false; rebuildSamples(); }
+    {
+        // the set the audio thread gave back: freed here, never there
+        std::shared_ptr<const rc::SampleSet> old;
+        { const juce::SpinLock::ScopedTryLockType sl(scoreLock); if (sl.isLocked()) std::swap(old, retiredSample); }
+    }
 }
 
 void ReChordProcessor::prepareToPlay(double sampleRate, int)
@@ -273,7 +278,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     {
         const juce::SpinLock::ScopedTryLockType sl(scoreLock);
         if (sl.isLocked() && scoreDirty) { engine.setScore(audioScore); scoreDirty = false; }
-        if (sl.isLocked() && sampleDirty) { engine.setSample(pendingSample); sampleDirty = false; }
+        if (sl.isLocked() && sampleDirty && retiredSample == nullptr) { retiredSample = engine.swapSample(pendingSample); sampleDirty = false; }
     }
     engine.setParams(currentParams());
 
@@ -339,7 +344,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
             const double beat = ppq + m.samplePosition / spb;
             if (learnStart < 0 && msg.isNoteOn()) learnStart = std::floor((beat + 0.1) / barBeats) * barBeats;   // a hair early = that bar
             if (learnStart >= 0 && beat >= learnStart - 0.1)
-                learnEvents[(size_t) learnCount++] = { std::max(beat, learnStart), key, msg.isNoteOn() };
+                learnEvents[(size_t) learnCount++] = { std::max(beat, learnStart), key + 128 * juce::jlimit(0, 15, msg.getChannel() - 1), msg.isNoteOn() };
         }
     }
     midi.clear();
@@ -447,7 +452,7 @@ void ReChordProcessor::finishLearn()
 {
     std::vector<Note> notes;
     std::map<int, double> on;
-    int skipOff[128] {};
+    std::vector<int> skipOff(16 * 128, 0);      // per channel + key
     const int count = learnCount;
     if (learnStart < 0 || count == 0) { learnState = 0; learnPos = -1.0; return; }    // no note came
     const double end = std::max(learnLastPpq, learnStart) - learnStart;
@@ -463,19 +468,19 @@ void ReChordProcessor::finishLearn()
             if (cluster >= 2)
                 for (auto it = on.begin(); it != on.end();)
                 {
-                    if (e.beat - it->second >= 0.5) { notes.push_back({ it->second - learnStart, e.beat - learnStart, it->first }); ++skipOff[it->first]; it = on.erase(it); }
+                    if (e.beat - it->second >= 0.5) { notes.push_back({ it->second - learnStart, e.beat - learnStart, it->first % 128 }); ++skipOff[(size_t) it->first]; it = on.erase(it); }
                     else ++it;
                 }
             // the same key again while it is still on (legato overlap, or a lost note-off): the earlier note ends here
-            if (on.count(e.key)) { if (e.beat - on[e.key] > 0.05) notes.push_back({ on[e.key] - learnStart, e.beat - learnStart, e.key }); ++skipOff[e.key]; }
+            if (on.count(e.key)) { if (e.beat - on[e.key] > 0.05) notes.push_back({ on[e.key] - learnStart, e.beat - learnStart, e.key % 128 }); ++skipOff[(size_t) e.key]; }
             on[e.key] = e.beat;
         }
-        else if (skipOff[e.key] > 0) --skipOff[e.key];
-        else if (on.count(e.key)) { notes.push_back({ on[e.key] - learnStart, e.beat - learnStart, e.key }); on.erase(e.key); }
+        else if (skipOff[(size_t) e.key] > 0) --skipOff[(size_t) e.key];
+        else if (on.count(e.key)) { notes.push_back({ on[e.key] - learnStart, e.beat - learnStart, e.key % 128 }); on.erase(e.key); }
     }
     // the bars that really went by (a stop or a Cubase cycle can end it early)
     const int span = juce::jlimit(1, rc::kMaxBars, (int) std::ceil(end / learnBarBeats - 0.05));
-    for (auto& kv : on) notes.push_back({ kv.second - learnStart, span * learnBarBeats, kv.first, true });
+    for (auto& kv : on) notes.push_back({ kv.second - learnStart, span * learnBarBeats, kv.first % 128, true });
     learnState = 0;
     learnPos = -1.0;
     applyNotes(notes, learnBarBeats, 0, 0);          // bar 1 = the bar of the first note; as many bars as have notes (like a dropped file)
@@ -682,7 +687,7 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
     ch.addTokens(m.getProperty("chords").toString(), " ", "");
     sp.addTokens(m.getProperty("split").toString(), " ", "");
     ends.addTokens(m.getProperty("ends").toString(), " ", "");
-    auto chordOf = [](const juce::String& s) { return rc::Chord { s.upToFirstOccurrenceOf(":", false, false).getIntValue() % 12,
+    auto chordOf = [](const juce::String& s) { return rc::Chord { ((s.upToFirstOccurrenceOf(":", false, false).getIntValue() % 12) + 12) % 12,
                                                                   juce::jlimit(0, rc::kNumQualities - 1, s.fromFirstOccurrenceOf(":", false, false).getIntValue()) }; };
     if (ch.size() == rc::kBars * 2 || ch.size() == rc::kMaxBars * 2) for (int i = 0; i < ch.size(); ++i) pattern.chord[i] = chordOf(ch[i]);
     if (sp.size() == rc::kBars || sp.size() == rc::kMaxBars) for (int i = 0; i < sp.size(); ++i) pattern.split[i] = sp[i].getIntValue() != 0;
@@ -711,7 +716,7 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
     for (int c = -1; c <= ns; ++c)
         for (int v = 0; v < rc::kMaxVoices; ++v, ++k)
         {
-            const int p = pi[k].getIntValue();
+            const int p = juce::jlimit(0, 127, pi[k].getIntValue());
             if (c < 0) s.entryPitch[v] = p; else if (c >= ns) s.exitPitch[v] = p; else s.pitch[c][v] = p;
         }
     k = 0;
@@ -861,8 +866,6 @@ void ReChordProcessor::rebuildSamples()
     }
     std::sort(set->zones.begin(), set->zones.end(), [](const rc::SampleZone& a, const rc::SampleZone& b) { return a.root < b.root; });
     builtLoop = loop; seenChar = loop;
-    sampleOld.push_back(sampleSet);               // kept a few rounds, so the audio thread never frees one
-    if (sampleOld.size() > 6) sampleOld.erase(sampleOld.begin());
     sampleSet = set->zones.empty() ? nullptr : std::shared_ptr<const rc::SampleSet>(set);
     const juce::SpinLock::ScopedLockType sl(scoreLock);
     pendingSample = sampleSet;
@@ -915,14 +918,17 @@ juce::ValueTree ReChordProcessor::samplesTree() const
 void ReChordProcessor::samplesFromTree(const juce::ValueTree& sm)
 {
     samples.clear();
-    for (int i = 0; sm.isValid() && i < sm.getNumChildren(); ++i)
+    for (int i = 0; sm.isValid() && i < sm.getNumChildren() && samples.size() < 8; ++i)
     {
         const auto one = sm.getChild(i);
+        const auto b64 = one.getProperty("wav").toString();
+        if (b64.length() > 32 * 1024 * 1024) continue;                       // more than a 20 s stereo 16-bit file can be
         juce::MemoryBlock mb;
-        if (!mb.fromBase64Encoding(one.getProperty("wav").toString())) continue;
+        if (!mb.fromBase64Encoding(b64)) continue;
         juce::WavAudioFormat wav;
         std::unique_ptr<juce::AudioFormatReader> r(wav.createReaderFor(new juce::MemoryInputStream(mb, true), true));
-        if (r == nullptr || r->lengthInSamples < 100) continue;
+        if (r == nullptr || r->lengthInSamples < 100 || r->numChannels < 1 || r->numChannels > 2 || r->sampleRate < 8000 || r->sampleRate > 384000) continue;
+        if (r->lengthInSamples > (juce::int64) (r->sampleRate * 20.5)) continue;
         SampleSrc src; src.name = one.getProperty("name").toString(); src.rate = r->sampleRate;
         src.ed.a = (double) one.getProperty("a", -1.0); src.ed.b = (double) one.getProperty("b", -1.0);
         src.ed.stretch = (float) (double) one.getProperty("stretch", 1.0); src.ed.xfade = (float) (double) one.getProperty("xfade", 0.3);

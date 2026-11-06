@@ -4,7 +4,7 @@
 #include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "2.5.4"
+ #define RECHORD_VERSION "2.5.5"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -135,8 +135,7 @@ public:
     std::atomic<int> audition { -1 };            // the SAMPLE EDIT page's PLAY: this key held
 private:
     bool editPending = false; double editAt = 0; int lastAudition = -1;
-    std::shared_ptr<const rc::SampleSet> sampleSet, pendingSample;
-    std::vector<std::shared_ptr<const rc::SampleSet>> sampleOld;
+    std::shared_ptr<const rc::SampleSet> sampleSet, pendingSample, retiredSample;   // retired: the audio thread's old one, freed on the message thread
     bool sampleDirty = false;
     float builtLoop = -1.f, seenChar = -1.f;
     double charAt = 0;

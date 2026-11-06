@@ -251,6 +251,8 @@ public:
     }
     void setScore(const Score& s) { score = s; cache.build(score); }
     void setSample(std::shared_ptr<const SampleSet> s) { sample = std::move(s); }
+    // the audio thread: take the new set, hand back the old one (the message thread lets it go)
+    std::shared_ptr<const SampleSet> swapSample(std::shared_ptr<const SampleSet> s) { std::swap(sample, s); return s; }
     void setParams(const Params& p) { prm = p; }
 
     // ---- the keyboard: the notes now held (sorted, max 8). Each new chord glides from the last one ----
@@ -660,7 +662,8 @@ private:
                         {
                             float a0, a1; z.read(ph, r, a0, a1);
                             sL += a0 * gain; sR += a1 * gain;
-                            ph += r; while (ph >= n) ph -= n;
+                            ph += r;
+                            if (ph >= n) { ph = std::fmod(ph, n); if (!(ph >= 0.0 && ph < n)) ph = 0.0; }   // bounded, and safe for inf / nan
                         };
                         play(v.ph[0], ratio, 1.f);
                         if (dbl > 0.001f)
