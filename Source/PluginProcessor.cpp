@@ -345,13 +345,22 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
         if (chordWait < 0)
         {
             bool anyFresh = false;
-            for (int k = 0; k < 128; ++k) anyFresh = anyFresh || fresh[k];
+            int nFresh = 0, nKept = 0;
+            for (int k = 0; k < 128; ++k)
+            {
+                anyFresh = anyFresh || fresh[k];
+                nFresh += fresh[k] ? 1 : 0;
+                nKept += (!fresh[k] && !stale[k] && (held[k] || sustained[k])) ? 1 : 0;
+            }
+            // 1-2 new keys over a chord still held = added to it (Am + G = Am7); 3+ = a new chord (legato change).
+            // With VOICES 1 (a line) every new key is the next note.
+            const bool adding = anyFresh && nKept > 0 && nFresh <= 2 && (int) apvts.getRawParameterValue("voices")->load() > 1;
             int notes[128], c = 0;
             for (int k = 0; k < 128; ++k)
             {
                 const bool down = held[k] || sustained[k];
                 if (!down) continue;
-                if (anyFresh && !fresh[k]) { stale[k] = true; continue; }    // still held from the chord before
+                if (anyFresh && !fresh[k] && !adding) { stale[k] = true; continue; }    // still held from the chord before
                 if (stale[k]) continue;
                 notes[c++] = k;
             }

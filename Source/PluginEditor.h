@@ -1173,9 +1173,9 @@ public:
         g.setColour(juce::Colour(0xff0a0a0a)); g.fillRoundedRectangle(w.expanded(4.f, 4.f), 6.f);
         const int n = src.audio.getNumSamples();
         const double len = n / src.rate;
-        const float xa = xOf(in.a), xb = xOf(in.b), la = xOf(in.loopA), lb = xOf(in.loopB);
+        const float xa = xOf(in.a), xb = xOf(in.b);
         g.setColour(orange.withAlpha(0.08f)); g.fillRect(juce::Rectangle<float>(xa, w.getY(), xb - xa, w.getHeight()));
-        const int cols = (int) w.getWidth();
+        const int cols = (int) (xOf(len) - w.getX());
         float pk = 1e-4f;                                   // the waveform fills the height, quiet files too
         for (int i = 0; i < n; i += 4) pk = std::max(pk, std::abs(0.5f * (src.audio.getSample(0, i) + src.audio.getSample(1, i))));
         const float sc = 0.48f / pk;
@@ -1190,8 +1190,29 @@ public:
             g.drawVerticalLine((int) x, w.getCentreY() - mx * w.getHeight() * sc, w.getCentreY() - mn * w.getHeight() * sc + 1.f);
         }
         g.setColour(juce::Colours::white.withAlpha(0.06f)); g.drawHorizontalLine((int) w.getCentreY(), w.getX(), w.getRight());
-        // the loop (what repeats) under the waveform
-        g.setColour(orange); g.fillRect(juce::Rectangle<float>(la, w.getBottom() + 3.f, std::max(2.f, lb - la), 2.f));
+        g.setColour(faint); g.setFont(mono(7.f)); g.drawText("FILE", w.withHeight(10.f).translated(3.f, 2.f), juce::Justification::topLeft);
+        // the result: what really plays - the part made level and stretched, the loop in it, the seam
+        {
+            const auto rr = res();
+            g.setColour(juce::Colour(0xff0a0a0a)); g.fillRoundedRectangle(rr.expanded(4.f, 3.f), 6.f);
+            const float x0 = xOf(in.a), x1 = xOf(in.a + in.resLen);
+            const float lx0 = xOf(in.a + in.resLoopA), lx1 = xOf(in.a + in.resLoopB), sx = xOf(in.a + in.resSeam);
+            g.setColour(orange.withAlpha(0.10f)); g.fillRect(juce::Rectangle<float>(lx0, rr.getY(), lx1 - lx0, rr.getHeight()));
+            juce::ColourGradient xf(orange.withAlpha(0.f), sx, 0, orange.withAlpha(0.28f), lx1, 0, false);
+            g.setGradientFill(xf); g.fillRect(juce::Rectangle<float>(sx, rr.getY(), std::max(1.f, lx1 - sx), rr.getHeight()));
+            const int bins = (int) in.resMin.size();
+            float rp = 1e-4f; for (int k = 0; k < bins; ++k) rp = std::max(rp, std::max(-in.resMin[(size_t) k], in.resMax[(size_t) k]));
+            const float rs = 0.46f / rp;
+            for (int px = (int) x0; px < (int) x1; ++px)
+            {
+                const int k0 = (int) ((px - x0) / (x1 - x0) * bins), k1 = std::max(k0 + 1, (int) ((px + 1 - x0) / (x1 - x0) * bins));
+                float mn = 0, mx = 0; for (int k = k0; k < std::min(k1, bins); ++k) { mn = std::min(mn, in.resMin[(size_t) k]); mx = std::max(mx, in.resMax[(size_t) k]); }
+                g.setColour(px >= lx0 && px <= lx1 ? juce::Colour(0xffe9e3d8) : juce::Colour(0xff6a6863));
+                g.drawVerticalLine(px, rr.getCentreY() - mx * rr.getHeight() * rs, rr.getCentreY() - mn * rr.getHeight() * rs + 1.f);
+            }
+            g.setColour(orange); g.fillRect(lx0 - 0.5f, rr.getY(), 1.f, rr.getHeight()); g.fillRect(lx1 - 0.5f, rr.getY(), 1.f, rr.getHeight());
+            g.setColour(faint); g.setFont(mono(7.f)); g.drawText("RESULT", rr.withHeight(10.f).translated(3.f, 2.f), juce::Justification::topLeft);
+        }
         // the part's edges
         for (int k = 0; k < 2; ++k)
         {
@@ -1200,11 +1221,11 @@ public:
             juce::Path t; t.addTriangle(x - 5.f, w.getY() - 1.f, x + 5.f, w.getY() - 1.f, x, w.getY() + 6.f); g.fillPath(t);
         }
         g.setColour(faint); g.setFont(mono(7.5f));
-        g.drawText("0 s", juce::Rectangle<float>(w.getX(), w.getBottom() + 6.f, 40.f, 10.f), juce::Justification::centredLeft);
-        g.drawText(juce::String(len, 2) + " s", juce::Rectangle<float>(w.getRight() - 50.f, w.getBottom() + 6.f, 50.f, 10.f), juce::Justification::centredRight);
+        g.drawText("0 s", juce::Rectangle<float>(w.getX(), w.getBottom() + 1.f, 40.f, 9.f), juce::Justification::centredLeft);
+        g.drawText(juce::String(len, 2) + " s", juce::Rectangle<float>(xOf(len) - 50.f, w.getBottom() + 1.f, 50.f, 9.f), juce::Justification::centredRight);
         g.setColour(dim);
         g.drawText(ui::U("drag the edges · drag inside = move · double-click = automatic (the steadiest part)"),
-                   juce::Rectangle<float>(w.getX() + 40.f, w.getBottom() + 6.f, w.getWidth() - 90.f, 10.f), juce::Justification::centred);
+                   juce::Rectangle<float>(w.getX(), res().getBottom() + 6.f, w.getWidth(), 10.f), juce::Justification::centred);
         // values
         const float cents = (in.root - std::round(in.root)) * 100.f;
         value(g, 0, "ROOT", juce::String(rc::noteName((int) std::lround(in.root))) + "  " + (cents >= 0 ? "+" : "") + juce::String(juce::roundToInt(cents)) + "c",
@@ -1288,7 +1309,9 @@ private:
         float x = (float) getWidth() - 14.f; for (int k = 4; k >= i; --k) x -= w[k] + 6.f;
         return { x + 6.f, 10.f, w[i], 22.f };
     }
-    juce::Rectangle<float> wave() const { return { 18.f, 46.f, (float) getWidth() - 36.f, 120.f }; }
+    juce::Rectangle<float> wave() const { return { 18.f, 42.f, (float) getWidth() - 36.f, 70.f }; }
+    juce::Rectangle<float> res() const { return { 18.f, 122.f, (float) getWidth() - 36.f, 48.f }; }
+    double viewLen() const { const auto& s = proc.samples[(size_t) proc.sampleSel]; return std::max(s.audio.getNumSamples() / s.rate, s.info.a + s.info.resLen) * 1.01; }
     juce::Rectangle<float> valueBox(int i) const { const float x[] = { 18.f, 250.f, 370.f, 490.f }, w[] = { 220.f, 110.f, 110.f, 250.f }; return { x[i], 200.f, w[i], 50.f }; }
     juce::Rectangle<float> rootBtn(int i) const { return { 118.f + i * 30.f, 214.f, 27.f, 20.f }; }
     void value(juce::Graphics& g, int i, const juce::String& title, const juce::String& v, const juce::String& sub) const
@@ -1300,8 +1323,8 @@ private:
         g.drawText(v, juce::Rectangle<float>(b.getX(), b.getY() + 14.f, i == 0 ? 96.f : b.getWidth(), 18.f), juce::Justification::centredLeft);
         g.setColour(faint); g.setFont(mono(7.5f)); g.drawText(sub, juce::Rectangle<float>(b.getX(), b.getY() + 34.f, b.getWidth(), 11.f), juce::Justification::centredLeft);
     }
-    float xOf(double t) const { const auto& s = proc.samples[(size_t) proc.sampleSel]; const auto w = wave(); return w.getX() + (float) (t / (s.audio.getNumSamples() / s.rate)) * w.getWidth(); }
-    double timeOf(float x) const { const auto& s = proc.samples[(size_t) proc.sampleSel]; const auto w = wave(); return juce::jlimit(0.0, 1.0, (double) ((x - w.getX()) / w.getWidth())) * s.audio.getNumSamples() / s.rate; }
+    float xOf(double t) const { const auto w = wave(); return w.getX() + (float) (t / viewLen()) * w.getWidth(); }
+    double timeOf(float x) const { const auto& s = proc.samples[(size_t) proc.sampleSel]; const auto w = wave(); return juce::jlimit(0.0, s.audio.getNumSamples() / s.rate, (double) ((x - w.getX()) / w.getWidth()) * viewLen()); }
     int hit(juce::Point<float> p) const
     {
         if (proc.samples.empty()) return -1;

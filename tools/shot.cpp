@@ -96,6 +96,8 @@ int main(int argc, char** argv)
         snap("l_sample.png");
         dev->openSample(true);
         snap("m_sample_edit.png");
+        proc.samples[0].ed.stretch = 2.5f; proc.rebuildNow(); 
+        snap("n_sample_stretch.png");
         dev->openSample(false);
     }
     juce::MemoryBlock mb; proc.getStateInformation(mb);

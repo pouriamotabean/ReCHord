@@ -82,6 +82,9 @@ struct SampleInfo
     double autoA = 0, autoB = 0, a = 0, b = 0, loopA = 0, loopB = 0;   // seconds in the file (the loop: before the stretch)
     float detected = 0, root = 60;
     int namePc = -1, nameOct = -99;
+    // the result (the part flattened and stretched) for the page: min / max per bin, its length, the loop inside it
+    std::vector<float> resMin, resMax;
+    double resLen = 0, resLoopA = 0, resLoopB = 0, resSeam = 0;   // seconds; resSeam = where the crossfade starts
 };
 
 // ---- analysis ----
@@ -357,6 +360,12 @@ inline bool buildZone(SampleZone& z, SampleInfo& info, const std::vector<float>&
     }
     X = std::min(X, Lp);                         // the seam never longer than the loop (CYCLE moves Lp after X was set)
     if (Lp < 32 || X < 1 || s0 - X < 0 || s0 + Lp > M) return false;
+    {
+        const int bins = 900;
+        info.resMin.assign(bins, 0.f); info.resMax.assign(bins, 0.f);
+        for (int i = 0; i < M; ++i) { const int k = (int) ((long long) i * bins / M); info.resMin[(size_t) k] = std::min(info.resMin[(size_t) k], m2[(size_t) i]); info.resMax[(size_t) k] = std::max(info.resMax[(size_t) k], m2[(size_t) i]); }
+        info.resLen = M / rate; info.resLoopA = s0 / rate; info.resLoopB = (s0 + Lp) / rate; info.resSeam = (s0 + Lp - X) / rate;
+    }
     info.loopA = a + (double) s0 / st / rate; info.loopB = a + (double) (s0 + Lp) / st / rate;
 
     z.name = name; z.rate = rate; z.len = Lp; z.root = root;
