@@ -313,7 +313,7 @@ struct Look : juce::LookAndFeel_V4
     void drawButtonText(juce::Graphics& g, juce::TextButton& b, bool over, bool) override
     {
         g.setFont(mono(b.getHeight() < 24 ? 8.5f : 9.5f, true));
-        g.setColour(b.getToggleState() || over ? white : label);
+        g.setColour(!b.isEnabled() ? faint.withAlpha(0.6f) : b.getToggleState() || over ? white : label);
         auto r = b.getLocalBounds();
         if (b.getToggleState()) r.removeFromLeft((int) b.getProperties()["seg"] == 3 ? 10 : 14);
         g.drawText(b.getButtonText(), r, juce::Justification::centred);
@@ -485,7 +485,7 @@ public:
         if (learnText.isNotEmpty())
         {
             g.setColour(orange); g.setFont(mono(8.5f, true));
-            g.drawText(learnText, bottomLine.withWidth(r.getWidth() - 50.f), juce::Justification::centredLeft);
+            g.drawText(learnText, bottomLine.withWidth(r.getWidth() - 200.f), juce::Justification::centredLeft);
         }
         else if (selLinkV >= 0 && selLinkV < N)
         {
@@ -498,8 +498,8 @@ public:
         else
         {
             g.setColour(dim.darker(0.2f)); g.setFont(mono(8.5f));
-            g.drawText(ui::U("glide: drag a line     |     curve: drag the middle     |     reconnect: line end → note     |     glide / end: click a line     |     reset: double-click"),
-                       juce::Rectangle<float>(0.f, r.getBottom() - 21.f, r.getWidth(), 14.f), juce::Justification::centred);
+            g.drawText(ui::U("glide: drag a line   |   curve: drag the middle   |   reconnect: line end → note   |   glide / end: click a line   |   reset: double-click"),
+                       juce::Rectangle<float>(0.f, r.getBottom() - 21.f, r.getWidth() - 150.f, 14.f), juce::Justification::centred);
         }
     }
 
@@ -1125,6 +1125,42 @@ private:
 // -----------------------------------------------------------------------------------------------------
 // glide mode: SMOOTH / STEPS / ROBOT (one parameter, three segments)
 // -----------------------------------------------------------------------------------------------------
+// 2.3: movement presets - how the voices move on every glide
+class MovePad : public juce::Component
+{
+public:
+    explicit MovePad(ReChordProcessor& p) : proc(p) {}
+    int last = -1;
+    void paint(juce::Graphics& g) override
+    {
+        using namespace ui;
+        for (int i = 0; i < ReChordProcessor::kNumMoves; ++i)
+        {
+            const auto r = cell(i);
+            bevelRect(g, r, 6.f, last == i ? juce::Colour(0xff232323) : hover == i ? juce::Colour(0xff1e1e1e) : juce::Colour(0xff181818), false, 0.2f);
+            if (last == i) { g.setColour(orange); g.fillEllipse(r.getX() + 8.f, r.getCentreY() - 3.f, 6.f, 6.f); }
+            g.setColour(last == i || hover == i ? white : label); g.setFont(mono(8.5f, true));
+            g.drawText(ReChordProcessor::moveName(i), r.withTrimmedLeft(last == i ? 10.f : 0.f), juce::Justification::centred);
+        }
+        g.setColour(label); g.setFont(mono(9.5f, true));
+        g.drawText("MOVE", juce::Rectangle<float>(0, (float) getHeight() - 40.f, (float) getWidth(), 18.f), juce::Justification::centred);
+        g.setColour(soft); g.setFont(mono(8.5f));
+        g.drawText("all glides, one click", juce::Rectangle<float>(0, (float) getHeight() - 20.f, (float) getWidth(), 14.f), juce::Justification::centred);
+    }
+    void mouseMove(const juce::MouseEvent& e) override { const int h = at(e.position); if (h != hover) { hover = h; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown(const juce::MouseEvent& e) override { const int h = at(e.position); if (h >= 0) { proc.applyMove(h); last = h; repaint(); } }
+private:
+    juce::Rectangle<float> cell(int i) const
+    {
+        const float w = ((float) getWidth() - 24.f) / 2.f, h = 22.f;
+        return { 8.f + (i % 2) * (w + 8.f), 6.f + (i / 2) * (h + 4.f), w, h };
+    }
+    int at(juce::Point<float> p) const { for (int i = 0; i < ReChordProcessor::kNumMoves; ++i) if (cell(i).contains(p)) return i; return -1; }
+    ReChordProcessor& proc;
+    int hover = -1;
+};
+
 class ModeSwitch : public juce::Component
 {
 public:
@@ -1209,7 +1245,7 @@ public:
     {
         using namespace ui;
         const int m = (int) proc.apvts.getRawParameterValue("osc")->load();
-        const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE", "TINE", "SINE", "KEYS", "BOWED", "808" };
+        const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE", "EP", "SINE", "KEYS", "BOWED", "808" };
         for (int i = 0; i < 9; ++i)
         {
             const auto r = seg(i);
@@ -1348,7 +1384,7 @@ private:
     ReChordProcessor& proc;
     int hover = -1, tab = 0;
     static constexpr int kGroups = 9;
-    static const char* groupName(int c) { static const char* g[] = { "PIANO", "BOWED", "BASS", "KEYS", "DREAM", "LEADS", "STRINGS", "VOICES", "PADS" }; return g[c]; }
+    static const char* groupName(int c) { static const char* g[] = { "PIANO", "BOWED", "BASS", "EP", "DREAM", "LEADS", "STRINGS", "VOICES", "PADS" }; return g[c]; }
     static int groupOf(int i) { for (int k = 0; k < kGroups; ++k) if (juce::String(rc::kPresets[i].group) == groupName(k)) return k; return 0; }
     juce::Rectangle<float> tabCell(int t) const { const float w = ((float) getWidth() - 36.f - (kGroups - 1) * 6.f) / (float) kGroups; return { 18.f + t * (w + 6.f), 40.f, w, 28.f }; }
     juce::Rectangle<float> item(int i) const
@@ -1497,7 +1533,7 @@ public:
         refresh();
     }
     explicit Device(ReChordProcessor& p)
-        : proc(p), view(p), strip(p), picker(p), drag(p), mode(p), type(p), presetBox(p), presets(p),
+        : proc(p), view(p), strip(p), picker(p), drag(p), mode(p), move(p), type(p), presetBox(p), presets(p),
           kChar(p, "character", "CHARACTER"), kAttack(p, "attack", "ATTACK"), kBright(p, "bright", "BRIGHT"), kVib(p, "vibrato", "VIBRATO"),
           kRel(p, "release", "RELEASE"), kWarm(p, "warmth", "WARMTH"), kSpace(p, "space", "SPACE"),
           kSpread(p, "spread", "SPREAD"), kDouble(p, "double", "DOUBLE"),
@@ -1568,7 +1604,7 @@ public:
         smartB.onClick = [this] { proc.smart(); view.setSel(-2, -1); };
         smartB.setTooltip("Lit = the smart voicing, untouched. Click = back to it (drops your connection / octave / glide edits)");
         learnB.onClick = [this] { proc.startLearn(); };
-        learnB.setTooltip("Learn 4 bars of chords: put the MIDI part on this track, click LEARN, play Cubase. Or drop a .mid file here");
+        learnB.setTooltip("Learn the chords: put the MIDI part on this track, click LEARN, play Cubase (from a bar line). Or drop a .mid file here");
         for (auto* b : { &listen, &smartB, &learnB }) addAndMakeVisible(*b);
 
         allB.onClick = [this] { if (view.hasSelLink()) proc.timingToAll(view.selectedT(), view.selectedV()); };
@@ -1577,6 +1613,13 @@ public:
         resetB.setTooltip("The selected glide back to its default timing");
         addChildComponent(allB);
         addChildComponent(resetB);
+        undoB.onClick = [this] { if (proc.undo()) { view.setSel(-2, -1); move.last = -1; } };
+        redoB.onClick = [this] { if (proc.redo()) { view.setSel(-2, -1); move.last = -1; } };
+        undoB.setTooltip("Undo the last edit of chords, notes, connections or glides (Ctrl+Z when the plugin has focus)");
+        redoB.setTooltip("Redo (Ctrl+Shift+Z / Ctrl+Y)");
+        addAndMakeVisible(undoB); addAndMakeVisible(redoB);
+        addChildComponent(move);
+        setWantsKeyboardFocus(true);
         view.onSelection = [this] { const bool s = view.hasSelLink(); allB.setVisible(s); resetB.setVisible(s); };
 
         strip.onClick = [this](int key)
@@ -1633,9 +1676,9 @@ public:
         g.drawText("v" RECHORD_VERSION, juce::Rectangle<float>(840.f, 630.f, 96.f, 10.f), juce::Justification::centredRight);
         if (tabs.current == 1)
         {
-            g.setColour(faint); g.setFont(mono(8.5f));
-            g.drawText("each glide's start / end / curve: the handles on the display", juce::Rectangle<float>(560.f, 540.f, 370.f, 14.f), juce::Justification::centredLeft);
-            g.drawText("KEYBOARD = how long a played chord glides to the next", juce::Rectangle<float>(560.f, 562.f, 370.f, 14.f), juce::Justification::centredLeft);
+            g.setColour(faint); g.setFont(mono(8.f));
+            g.drawText("one glide: its handles", juce::Rectangle<float>(780.f, 548.f, 160.f, 12.f), juce::Justification::centredLeft);
+            g.drawText("KEYBOARD: played chords", juce::Rectangle<float>(780.f, 566.f, 160.f, 12.f), juce::Justification::centredLeft);
         }
     }
     void resized() override
@@ -1656,11 +1699,20 @@ public:
         strip.bars = b;
         strip.setBounds(24, 374, 912, 106);
         picker.setBounds(24 + 30, 222, 912 - 60, 128);
-        allB.setBounds(24 + 912 - 150, 96 + 262 - 26, 56, 20);
-        resetB.setBounds(24 + 912 - 88, 96 + 262 - 26, 72, 20);
+        allB.setBounds(24 + 912 - 284, 96 + 262 - 26, 56, 20);
+        resetB.setBounds(24 + 912 - 222, 96 + 262 - 26, 68, 20);
+        undoB.setBounds(24 + 912 - 140, 96 + 262 - 26, 60, 20);
+        redoB.setBounds(24 + 912 - 76, 96 + 262 - 26, 60, 20);
 
         tabs.setBounds(24, 506, 108, 120);
         showTab();
+    }
+    bool keyPressed(const juce::KeyPress& k) override
+    {
+        const bool cmd = k.getModifiers().isCommandDown();
+        if (cmd && (k.getKeyCode() == 'Z' || k.getKeyCode() == 'z')) { if (k.getModifiers().isShiftDown() ? proc.redo() : proc.undo()) view.setSel(-2, -1); return true; }
+        if (cmd && (k.getKeyCode() == 'Y' || k.getKeyCode() == 'y')) { if (proc.redo()) view.setSel(-2, -1); return true; }
+        return false;
     }
     void refresh()
     {
@@ -1672,6 +1724,7 @@ public:
         if (presets.isVisible()) presets.repaint();
         drag.repaint();
         smartB.setToggleState(!proc.score.edited, juce::dontSendNotification);
+        undoB.setEnabled(proc.canUndo()); redoB.setEnabled(proc.canRedo());
         learnB.setToggleState(proc.learnState.load() != 0, juce::dontSendNotification);
         const int nb = proc.pattern.activeBars();
         view.learnText = proc.learnState.load() == 1 ? "LEARN: waiting for Cubase to play - the next bar line starts " + juce::String(nb) + " bars"
@@ -1688,6 +1741,8 @@ private:
     Picker picker;
     DragChip drag;
     ModeSwitch mode;
+    MovePad move;
+    juce::TextButton undoB { "UNDO" }, redoB { "REDO" };
     TypeSwitch type;
     PresetBox presetBox;
     PresetPanel presets;
@@ -1701,6 +1756,8 @@ private:
                                       key { &kTrans, &kOct, &kVoices, &kVol };
         for (auto* c : sound) c->setVisible(tabs.current == 0);
         for (auto* c : glide) c->setVisible(tabs.current == 1);
+        move.setVisible(tabs.current == 1);
+        move.setBounds(540, 504, 230, 124);
         for (auto* c : key) c->setVisible(tabs.current == 2);
         auto& list = tabs.current == 0 ? sound : tabs.current == 1 ? glide : key;
         const float step = list.size() <= 4 ? 118.f : 98.f;

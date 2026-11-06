@@ -4,7 +4,7 @@
 #include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "2.2.0"
+ #define RECHORD_VERSION "2.3.0"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -48,12 +48,22 @@ public:
     juce::String slotLabel(int i) const;                     // the chord slot i really plays
     void setEnd(int which, int mode);                        // which: -1 entry, -2 exit
     // edits of one link: t = transition (0..nSlots-1 after slot t, -1 entry -> slot 1), v = voice
-    void linkTo(int t, int v, int target) { rc::setLink(score, t, v, target); publish(); }
-    void toggleGlide(int t, int v) { auto& l = score.linkAt(t, v); l.glide = !l.glide; score.edited = true; publish(); }
+    void linkTo(int t, int v, int target) { checkpoint(); rc::setLink(score, t, v, target); publish(); }
+    void toggleGlide(int t, int v) { checkpoint(); auto& l = score.linkAt(t, v); l.glide = !l.glide; score.edited = true; publish(); }
     void setTiming(int t, int v, float early, float late, float curve);
     void resetTiming(int t, int v) { setTiming(t, v, rc::Link().early, rc::Link().late, rc::Link().curve); }
     void timingToAll(int t, int v);
     bool moveOctave(int col, int v, int dir);                // col: slot, -1 entry, nSlots exit
+    // 2.3: movement presets - how the voices move, on every glide (0 together, 1 bass first, 2 top first, 3 bloom, 4 snap, 5 drift)
+    void applyMove(int kind);
+    static const char* moveName(int kind);
+    static constexpr int kNumMoves = 6;
+    // undo / redo of the chords, notes, links and glides (not the sound)
+    void checkpoint(int coalesce = 0);
+    bool undo();
+    bool redo();
+    bool canUndo() const { return !undoStack.empty(); }
+    bool canRedo() const { return !redoStack.empty(); }
     std::atomic<int> modelVersion { 0 };
 
     rc::Params currentParams() const;
@@ -69,12 +79,12 @@ public:
     bool presetModified() const;
 
     // keyboard + LEARN + a dropped MIDI file
-    struct Note { double a, b; int key; };                   // in beats from the first bar
+    struct Note { double a, b; int key; bool open = false; }; // in beats from the first bar; open = no note-off came
     void startLearn();                                       // 0 off -> 1 armed -> 2 recording -> 3 done (message thread finishes)
     std::atomic<int> learnState { 0 };
     std::atomic<double> learnPos { -1.0 };                   // bars recorded so far (display)
     bool loadMidiFile(const juce::File&);
-    bool applyNotes(const std::vector<Note>&, double barBeats, int firstBar);
+    bool applyNotes(const std::vector<Note>&, double barBeats, int firstBar, int bars = 0);
     void seekTo(double beat) { seekBeat = beat; }
 
     std::atomic<double> uiBeat { -1.0 };                    // < 0: not playing
@@ -99,7 +109,10 @@ private:
     struct LearnEvent { double beat; int key; bool on; };
     std::vector<LearnEvent> learnEvents = std::vector<LearnEvent>(4096);
     std::atomic<int> learnCount { 0 };
-    double learnStart = 0, learnBarBeats = 4;
+    double learnStart = 0, learnBarBeats = 4, learnLastPpq = 0;
+    struct Snap { rc::Pattern pattern; rc::Score score; };
+    std::vector<Snap> undoStack, redoStack;
+    int lastCoalesce = 0; double lastCheck = 0;
     void finishLearn();
 
     static juce::AudioProcessorValueTreeState::ParameterLayout layout();

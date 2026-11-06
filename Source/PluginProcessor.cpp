@@ -18,7 +18,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
         p.push_back(std::make_unique<APF>(PID { id, 1 }, name, r, def,
                                           juce::AudioParameterFloatAttributes().withStringFromValueFunction(txt)));
     };
-    p.push_back(std::make_unique<juce::AudioParameterChoice>(PID { "osc", 1 }, "Sound", juce::StringArray { "FM", "Analog", "Strings", "Voice", "Tine", "Sine", "Keys", "Bowed", "808" }, 0));
+    p.push_back(std::make_unique<juce::AudioParameterChoice>(PID { "osc", 1 }, "Sound", juce::StringArray { "FM", "Analog", "Strings", "Voice", "EP", "Sine", "Keys", "Bowed", "808" }, 0));
     fl("character", "Character", 0.f, 1.f, 0.45f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
     fl("attack", "Attack", 2.f, 1500.f, 35.f, 120.f, msText);
     fl("bright", "Bright", 0.f, 1.f, 0.45f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
@@ -126,6 +126,7 @@ void ReChordProcessor::publish()
 
 void ReChordProcessor::smart()
 {
+    checkpoint();
     lastVoices = (int) apvts.getRawParameterValue("voices")->load();
     rc::buildScore(score, pattern, lastVoices, 0);       // OCTAVE moves the sound, not the voicing
     publish();
@@ -133,6 +134,7 @@ void ReChordProcessor::smart()
 
 void ReChordProcessor::setChord(int key, int root, int quality)
 {
+    checkpoint();
     chordFor(key) = { (root % 12 + 12) % 12, quality };
     if (key >= 0 && key % 2 == 0 && !pattern.split[key / 2]) pattern.chord[key + 1] = pattern.chord[key];   // a later split starts from it
     smart();
@@ -141,6 +143,7 @@ void ReChordProcessor::setChord(int key, int root, int quality)
 void ReChordProcessor::setBarOn(int bar, bool on)
 {
     if (!on && pattern.activeBars() <= 1 && pattern.on[bar]) return;     // at least one bar
+    checkpoint();
     pattern.on[bar] = on;
     smart();
 }
@@ -148,6 +151,7 @@ void ReChordProcessor::setBarOn(int bar, bool on)
 bool ReChordProcessor::movePitch(int col, int v, int semis)
 {
     if (semis == 0) return false;
+    checkpoint(2000 + (col + 1) * 8 + v);
     const int np = score.pitchAt(col, v) + semis;
     if (np < 21 || np > 108) return false;
     for (int j = 0; j < score.nVoices; ++j) if (j != v && score.pitchAt(col, j) == np) return false;  // no unisons
@@ -180,6 +184,7 @@ juce::String ReChordProcessor::slotLabel(int i) const
 
 void ReChordProcessor::setSplit(int bar, bool on)
 {
+    checkpoint();
     pattern.split[bar] = on;
     if (on) pattern.chord[bar * 2 + 1] = pattern.chord[bar * 2];
     smart();
@@ -187,6 +192,7 @@ void ReChordProcessor::setSplit(int bar, bool on)
 
 void ReChordProcessor::setEnd(int which, int mode)
 {
+    checkpoint();
     if (mode == rc::Loop) { pattern.entryMode = pattern.exitMode = rc::Loop; }
     else
     {
@@ -198,6 +204,7 @@ void ReChordProcessor::setEnd(int which, int mode)
 
 void ReChordProcessor::setTiming(int t, int v, float early, float late, float curve)
 {
+    checkpoint(1000 + (t + 1) * 8 + v);
     auto& l = score.linkAt(t, v);
     l.early = juce::jlimit(0.f, 4.f, early);
     l.late = juce::jlimit(0.f, 4.f, late);
@@ -208,6 +215,7 @@ void ReChordProcessor::setTiming(int t, int v, float early, float late, float cu
 
 void ReChordProcessor::timingToAll(int t, int v)
 {
+    checkpoint();
     const auto src = score.linkAt(t, v);
     for (int i = -1; i < score.nSlots; ++i)
         for (int j = 0; j < score.nVoices; ++j)
@@ -221,6 +229,7 @@ void ReChordProcessor::timingToAll(int t, int v)
 
 bool ReChordProcessor::moveOctave(int col, int v, int dir)
 {
+    checkpoint(2000 + (col + 1) * 8 + v);
     const int np = score.pitchAt(col, v) + 12 * dir;
     if (np < 28 || np > 103) return false;
     for (int j = 0; j < score.nVoices; ++j) if (j != v && score.pitchAt(col, j) == np) return false;  // no unisons
@@ -273,6 +282,16 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     //      play legato, the keys still held from the last chord are left out of the new one; a gap up to 0.5 s
     //      between chords still glides ----
     const double spb = getSampleRate() * 60.0 / bpm;
+    // ---- LEARN: armed -> records from the next bar line, for the bars that are on, of Cubase playback ----
+    if (learnState.load() == 1 && hostPlaying)
+    {
+        learnStart = std::ceil(ppq / barBeats - 0.02) * barBeats;         // a block that starts a hair after the line still counts
+        learnBarBeats = barBeats;
+        learnCount = 0;
+        learnLastPpq = ppq;
+        learnState = 2;
+    }
+    if (learnState.load() == 2 && hostPlaying && ppq < learnLastPpq - 0.01) learnState = 3;   // Cubase cycled back: one pass is enough
     for (const auto m : midi)
     {
         const auto msg = m.getMessage();
@@ -303,7 +322,11 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
             chordWait = 0;
         }
         if (learnState.load() == 2 && hostPlaying && (msg.isNoteOn() || msg.isNoteOff()) && learnCount < (int) learnEvents.size())
-            learnEvents[(size_t) learnCount++] = { ppq + m.samplePosition / spb, key, msg.isNoteOn() };
+        {
+            const double beat = ppq + m.samplePosition / spb;
+            if (beat >= learnStart - 0.1)                                        // a note played a little early belongs to the bar
+                learnEvents[(size_t) learnCount++] = { std::max(beat, learnStart), key, msg.isNoteOn() };
+        }
     }
     midi.clear();
     if (chordWait >= 0)
@@ -337,17 +360,10 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     }
 
     // ---- LEARN: armed -> records from the next bar line for 4 bars of Cubase playback ----
-    const int ls = learnState.load();
-    if (ls == 1 && hostPlaying)
+    if (learnState.load() == 2)
     {
-        learnStart = std::ceil(ppq / barBeats - 1e-6) * barBeats;
-        learnBarBeats = barBeats;
-        learnCount = 0;
-        learnState = 2;
-    }
-    else if (ls == 2)
-    {
-        if (!hostPlaying || ppq >= learnStart + pattern.activeBars() * learnBarBeats) learnState = 3;
+        learnLastPpq = ppq;
+        if (!hostPlaying || ppq + n / spb >= learnStart + pattern.activeBars() * learnBarBeats) learnState = 3;
         learnPos = hostPlaying ? (ppq - learnStart) / learnBarBeats : -1.0;
     }
 
@@ -403,18 +419,38 @@ void ReChordProcessor::finishLearn()
 {
     std::vector<Note> notes;
     std::map<int, double> on;
+    int skipOff[128] {};
     const int count = learnCount;
+    const double end = std::max(learnLastPpq, learnStart) - learnStart;
     for (int i = 0; i < count; ++i)
     {
         const auto& e = learnEvents[(size_t) i];
-        if (e.on) on[e.key] = e.beat;
+        if (e.on)
+        {
+            // a new chord (2+ keys within 1/10 beat) ends the notes still on from long before it - so a lost
+            // note-off can't spill one chord into all the next ones
+            int cluster = 0;
+            for (int j = i; j < count && learnEvents[(size_t) j].beat - e.beat < 0.1; ++j) if (learnEvents[(size_t) j].on) ++cluster;
+            if (cluster >= 2)
+                for (auto it = on.begin(); it != on.end();)
+                {
+                    if (e.beat - it->second >= 0.5) { notes.push_back({ it->second - learnStart, e.beat - learnStart, it->first }); ++skipOff[it->first]; it = on.erase(it); }
+                    else ++it;
+                }
+            // the same key again while it is still on (legato overlap, or a lost note-off): the earlier note ends here
+            if (on.count(e.key)) { if (e.beat - on[e.key] > 0.05) notes.push_back({ on[e.key] - learnStart, e.beat - learnStart, e.key }); ++skipOff[e.key]; }
+            on[e.key] = e.beat;
+        }
+        else if (skipOff[e.key] > 0) --skipOff[e.key];
         else if (on.count(e.key)) { notes.push_back({ on[e.key] - learnStart, e.beat - learnStart, e.key }); on.erase(e.key); }
     }
-    for (auto& kv : on) notes.push_back({ kv.second - learnStart, pattern.activeBars() * learnBarBeats, kv.first });
+    // the bars that really went by (a stop or a Cubase cycle can end it early)
+    const int bars = juce::jlimit(1, pattern.activeBars(), (int) std::ceil(end / learnBarBeats - 0.05));
+    for (auto& kv : on) notes.push_back({ kv.second - learnStart, bars * learnBarBeats, kv.first, true });
     const int firstBar = (int) std::llround(learnStart / learnBarBeats);
     learnState = 0;
     learnPos = -1.0;
-    applyNotes(notes, learnBarBeats, firstBar);
+    applyNotes(notes, learnBarBeats, firstBar, bars);
 }
 
 bool ReChordProcessor::loadMidiFile(const juce::File& f)
@@ -458,10 +494,20 @@ bool ReChordProcessor::loadMidiFile(const juce::File& f)
 
 // 4 bars of notes -> the pattern: a chord per half bar (a bar is split when its halves differ), and the voicing
 // as played when every chord has the same 3 or 4 notes
-bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeats, int firstBar)
+bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeats, int firstBar, int bars)
 {
+    if (notes.empty()) return false;
+    checkpoint();
     struct Half { int mask = 0, bass = -1; std::vector<int> keys; };
-    const int NB = pattern.activeBars();
+    // as many bars as the material has (a 4-bar part = a 4-bar pattern); those bars on, the rest off
+    if (bars <= 0)
+    {
+        double last = 0;
+        for (auto& nt : notes) last = std::max(last, nt.a);
+        bars = (int) std::floor((last + 0.5) / barBeats) + 1;     // a chord played a little early still starts its bar
+    }
+    const int NB = juce::jlimit(1, rc::kMaxBars, bars);
+    for (int b = 0; b < rc::kMaxBars; ++b) pattern.on[b] = b < NB;
     Half half[rc::kMaxBars][2];
     bool any = false;
     for (int b = 0; b < NB; ++b)
@@ -469,8 +515,11 @@ bool ReChordProcessor::applyNotes(const std::vector<Note>& notes, double barBeat
         {
             const double w0 = b * barBeats + h * barBeats * 0.5, w1 = w0 + barBeats * 0.5;
             auto& H = half[b][h];
+            bool fresh = false;
+            for (auto& nt : notes) fresh = fresh || (nt.a >= w0 - 0.25 && nt.a < w1);
             for (auto& nt : notes)
             {
+                if (nt.open && fresh && nt.a < w0 - 0.25) continue;
                 const double ov = std::min(w1, nt.b) - std::max(w0, nt.a);
                 if (ov < (w1 - w0) * 0.3) continue;
                 if (std::find(H.keys.begin(), H.keys.end(), nt.key) == H.keys.end()) H.keys.push_back(nt.key);
@@ -643,7 +692,78 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
     s.edited = (bool) m.getProperty("edited", false);
     score = s;
     publish();
+    undoStack.clear(); redoStack.clear();
 }
 
 juce::AudioProcessorEditor* ReChordProcessor::createEditor() { return new ReChordEditor(*this); }
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new ReChordProcessor(); }
+
+// ---------------- 2.3: undo / redo, movement presets ----------------
+void ReChordProcessor::checkpoint(int coalesce)
+{
+    const double now = juce::Time::getMillisecondCounterHiRes();
+    if (coalesce != 0 && coalesce == lastCoalesce && now - lastCheck < 1500.0) { lastCheck = now; return; }   // one drag = one step
+    if (coalesce == 0 && lastCoalesce == 0 && now - lastCheck < 40.0) { lastCheck = now; return; }            // an edit that calls another one
+    lastCoalesce = coalesce; lastCheck = now;
+    undoStack.push_back({ pattern, score });
+    if (undoStack.size() > 64) undoStack.erase(undoStack.begin());
+    redoStack.clear();
+}
+
+bool ReChordProcessor::undo()
+{
+    if (undoStack.empty()) return false;
+    redoStack.push_back({ pattern, score });
+    pattern = undoStack.back().pattern; score = undoStack.back().score; undoStack.pop_back();
+    lastCoalesce = 0;
+    publish();
+    return true;
+}
+
+bool ReChordProcessor::redo()
+{
+    if (redoStack.empty()) return false;
+    undoStack.push_back({ pattern, score });
+    pattern = redoStack.back().pattern; score = redoStack.back().score; redoStack.pop_back();
+    lastCoalesce = 0;
+    publish();
+    return true;
+}
+
+const char* ReChordProcessor::moveName(int kind)
+{
+    static const char* n[] = { "TOGETHER", "BASS FIRST", "TOP FIRST", "BLOOM", "SNAP", "DRIFT" };
+    return n[juce::jlimit(0, kNumMoves - 1, kind)];
+}
+
+void ReChordProcessor::applyMove(int kind)
+{
+    checkpoint();
+    const int nv = score.nVoices;
+    for (int t = -1; t < score.nSlots; ++t)
+    {
+        // the voices' order by pitch in the chord the glide leaves
+        int rank[rc::kMaxVoices] {};
+        for (int v = 0; v < nv; ++v)
+            for (int u = 0; u < nv; ++u)
+                if (score.pitchAt(t, u) < score.pitchAt(t, v) || (score.pitchAt(t, u) == score.pitchAt(t, v) && u < v)) ++rank[v];
+        for (int v = 0; v < nv; ++v)
+        {
+            auto& l = score.linkAt(t, v);
+            const float x = nv > 1 ? (float) rank[v] / (float) (nv - 1) : 0.5f;   // 0 = bass ... 1 = top
+            float e = 0.5f, la = 0.25f, c = 0.f;
+            switch (kind)
+            {
+                case 1: { const float d = (x - 0.5f) * 0.7f; e = 0.5f - d; la = 0.25f + d; break; }   // bass leaves and lands first
+                case 2: { const float d = (0.5f - x) * 0.7f; e = 0.5f - d; la = 0.25f + d; break; }   // the top first
+                case 3: e = 1.0f; la = 0.4f; c = 0.45f; break;                                         // waits, then opens
+                case 4: e = 0.12f; la = 0.05f; c = 0.f; break;                                         // quick
+                case 5: e = 1.5f; la = 1.0f; c = -0.35f; break;                                        // long, lazy
+                default: break;
+            }
+            l.early = juce::jlimit(0.f, 4.f, e); l.late = juce::jlimit(0.f, 4.f, la); l.curve = c;
+        }
+    }
+    score.edited = true;
+    publish();
+}

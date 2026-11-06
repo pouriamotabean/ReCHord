@@ -77,6 +77,13 @@ int main(int argc, char** argv)
     proc.movePitch(4, 1, 1);
     std::printf("slot 4 label after a semitone: %s\n", proc.slotLabel(4).toRawUTF8());
     snap("j_semitone.png");
+    proc.undo();
+    std::printf("after undo: %s  (can redo %d)\n", proc.slotLabel(4).toRawUTF8(), (int) proc.canRedo());
+    proc.redo();
+    std::printf("after redo: %s\n", proc.slotLabel(4).toRawUTF8());
+    proc.applyMove(1);
+    std::printf("move BASS FIRST: link0 v0 early %.2f late %.2f, v2 early %.2f late %.2f\n", proc.score.linkAt(0, 0).early, proc.score.linkAt(0, 0).late, proc.score.linkAt(0, 2).early, proc.score.linkAt(0, 2).late);
+    if (auto* tabs = findChild<PanelTabs>(ed.get())) { tabs->current = 1; tabs->onChange(1); snap("k_glide_move.png"); tabs->current = 0; tabs->onChange(0); }
     std::printf("8 bars: slots %d bars %d, render ", proc.score.nSlots, proc.score.nBars);
     {
         auto f8 = proc.renderWav();
