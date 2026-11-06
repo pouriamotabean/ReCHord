@@ -4,7 +4,7 @@
 #include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "2.3.0"
+ #define RECHORD_VERSION "2.4.0"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -73,6 +73,13 @@ public:
 
     juce::File renderWav();
 
+    // 2.4 SAMPLE: sustained notes from any synth (WAV / AIFF / FLAC); several files = a small multisample
+    int loadSamples(const juce::StringArray& files);         // the files that loaded (replaces the set)
+    void clearSamples();
+    juce::String sampleLabel() const;                        // for the preset box
+    juce::String sampleDetail() const;                       // "C3 · F4 · A5"
+    bool hasSamples() const { return !samples.empty(); }
+
     // presets (sound only)
     int presetIndex = 0;
     void loadPreset(int i);
@@ -111,6 +118,13 @@ private:
     std::atomic<int> learnCount { 0 };
     double learnStart = 0, learnBarBeats = 4, learnLastPpq = 0;
     struct Snap { rc::Pattern pattern; rc::Score score; };
+    struct SampleSrc { juce::String name; double rate = 48000; juce::AudioBuffer<float> audio; };
+    std::vector<SampleSrc> samples;
+    std::shared_ptr<const rc::SampleSet> sampleSet, sampleOld, pendingSample;
+    bool sampleDirty = false;
+    float builtLoop = -1.f, seenChar = -1.f;
+    double charAt = 0;
+    void rebuildSamples();
     std::vector<Snap> undoStack, redoStack;
     int lastCoalesce = 0; double lastCheck = 0;
     void finishLearn();

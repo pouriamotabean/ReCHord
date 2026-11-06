@@ -1245,8 +1245,8 @@ public:
     {
         using namespace ui;
         const int m = (int) proc.apvts.getRawParameterValue("osc")->load();
-        const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE", "EP", "SINE", "KEYS", "BOWED", "808" };
-        for (int i = 0; i < 9; ++i)
+        const char* names[] = { "FM", "ANALOG", "STRINGS", "VOICE", "EP", "SINE", "KEYS", "BOWED", "808", "SAMPLE" };
+        for (int i = 0; i < rc::kNumOsc; ++i)
         {
             const auto r = seg(i);
             g.setFont(mono(8.5f, m == i));
@@ -1257,13 +1257,16 @@ public:
         }
     }
 
-    void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < 9; ++i) if (seg(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
+    std::function<void()> onSampleRequest;      // SAMPLE clicked with nothing loaded, or clicked again: pick files
+    void mouseMove(const juce::MouseEvent& e) override { int h = -1; for (int i = 0; i < rc::kNumOsc; ++i) if (seg(i).contains(e.position)) h = i; if (h != hover) { hover = h; repaint(); } }
     void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
     void mouseDown(const juce::MouseEvent& e) override
     {
-        for (int i = 0; i < 9; ++i)
+        for (int i = 0; i < rc::kNumOsc; ++i)
             if (seg(i).contains(e.position))
             {
+                const int m = (int) proc.apvts.getRawParameterValue("osc")->load();
+                if (i == rc::OscSample && (!proc.hasSamples() || m == rc::OscSample)) { if (onSampleRequest) onSampleRequest(); if (!proc.hasSamples()) return; }
                 auto* p = proc.apvts.getParameter("osc");
                 p->beginChangeGesture(); p->setValueNotifyingHost(p->convertTo0to1((float) i)); p->endChangeGesture();
                 repaint();
@@ -1308,10 +1311,11 @@ public:
         }
         const auto& ps = rc::kPresets[proc.presetIndex];
         const auto mid = r.reduced(26.f, 0.f);
-        g.setColour(faint); g.setFont(mono(7.5f));
-        g.drawText(ps.group, mid.withHeight(14.f).translated(0, 5.f), juce::Justification::centred);
+        const bool smp = (int) proc.apvts.getRawParameterValue("osc")->load() == rc::OscSample;
+        g.setColour(smp ? orange.withAlpha(0.8f) : faint); g.setFont(mono(7.5f));
+        g.drawText(smp ? proc.sampleDetail() : juce::String(ps.group), mid.withHeight(14.f).translated(0, 5.f), juce::Justification::centred);
         g.setColour(hover == 1 ? white : label.brighter(0.2f)); g.setFont(sans(13.f));
-        g.drawText(juce::String(ps.name) + (proc.presetModified() ? "  *" : ""), mid.withTrimmedTop(15.f).withTrimmedBottom(3.f), juce::Justification::centred);
+        g.drawFittedText(smp ? proc.sampleLabel() : juce::String(ps.name) + (proc.presetModified() ? "  *" : ""), mid.withTrimmedTop(15.f).withTrimmedBottom(3.f).toNearestInt(), juce::Justification::centred, 1, 0.8f);
     }
     void mouseMove(const juce::MouseEvent& e) override { const int h = at(e.position); if (h != hover) { hover = h; repaint(); } }
     void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
@@ -1518,16 +1522,25 @@ class Device : public juce::Component, public juce::FileDragAndDropTarget
 public:
     bool isInterestedInFileDrag(const juce::StringArray& files) override
     {
-        for (auto& f : files) if (f.endsWithIgnoreCase(".mid") || f.endsWithIgnoreCase(".midi")) return true;
+        for (auto& f : files) if (isMidi(f) || isAudio(f)) return true;
         return false;
     }
-    void fileDragEnter(const juce::StringArray&, int, int) override { dropping = true; refresh(); }
+    static bool isMidi(const juce::String& f) { return f.endsWithIgnoreCase(".mid") || f.endsWithIgnoreCase(".midi"); }
+    static bool isAudio(const juce::String& f) { for (auto* e : { ".wav", ".aif", ".aiff", ".flac" }) if (f.endsWithIgnoreCase(e)) return true; return false; }
+    void fileDragEnter(const juce::StringArray& files, int, int) override
+    {
+        dropping = true; droppingAudio = false;
+        for (auto& f : files) droppingAudio = droppingAudio || isAudio(f);
+        refresh();
+    }
     void fileDragExit(const juce::StringArray&) override { dropping = false; refresh(); }
     void filesDropped(const juce::StringArray& files, int, int) override
     {
         dropping = false;
-        for (auto& f : files)
-            if (f.endsWithIgnoreCase(".mid") || f.endsWithIgnoreCase(".midi")) { proc.loadMidiFile(juce::File(f)); break; }
+        juce::StringArray audio;
+        for (auto& f : files) if (isAudio(f)) audio.add(f);
+        if (!audio.isEmpty()) proc.loadSamples(audio);
+        else for (auto& f : files) if (isMidi(f)) { proc.loadMidiFile(juce::File(f)); break; }
         closePicker();
         view.setSel(-2, -1);
         refresh();
@@ -1573,8 +1586,8 @@ public:
         // CHARACTER means something else for each sound
         kChar.titleText = [this]
         {
-            const char* t[] = { "BITE", "DETUNE", "ENSEMBLE", "VOWEL", "BELL", "HARMONICS", "BODY", "BODY", "DRIVE" };
-            return juce::String(t[juce::jlimit(0, 8, (int) proc.apvts.getRawParameterValue("osc")->load())]);
+            const char* t[] = { "BITE", "DETUNE", "ENSEMBLE", "VOWEL", "BELL", "HARMONICS", "BODY", "BODY", "DRIVE", "LOOP" };
+            return juce::String(t[juce::jlimit(0, rc::kNumOsc - 1, (int) proc.apvts.getRawParameterValue("osc")->load())]);
         };
         kChar.valueText = [this]
         {
@@ -1582,6 +1595,8 @@ public:
             const int o = (int) proc.apvts.getRawParameterValue("osc")->load();
             if (o == rc::OscVoice)
                 return juce::String(c < 0.25f ? "ah" : c < 0.42f ? "ah-oh" : c < 0.58f ? "oh" : c < 0.75f ? "oh-oo" : "oo");
+            if (o == rc::OscSample)
+                return juce::String(c < 0.12f ? "short" : c > 0.88f ? "long" : juce::String(juce::roundToInt(c * 100)) + "%");
             if (o == rc::OscKeys || o == rc::OscBowed)
             {
                 // the measured body it is nearest to (between two = both names)
@@ -1601,6 +1616,7 @@ public:
         listen.getProperties().set("seg", 3); learnB.getProperties().set("seg", 3); smartB.getProperties().set("seg", 3);
         listenAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(proc.apvts, "listen", listen);
         listen.setTooltip("On: plays with Cubase when Cubase plays, and on its own when Cubase is stopped. Off: silent");
+        type.onSampleRequest = [this] { pickSamples(); };
         smartB.onClick = [this] { proc.smart(); view.setSel(-2, -1); };
         smartB.setTooltip("Lit = the smart voicing, untouched. Click = back to it (drops your connection / octave / glide edits)");
         learnB.onClick = [this] { proc.startLearn(); };
@@ -1729,14 +1745,28 @@ public:
         const int nb = proc.pattern.activeBars();
         view.learnText = proc.learnState.load() == 1 ? "LEARN: waiting for Cubase to play - the next bar line starts " + juce::String(nb) + " bars"
                        : proc.learnState.load() == 2 ? "LEARN: listening, bar " + juce::String(juce::jlimit(1, nb, (int) proc.learnPos.load() + 1)) + " of " + juce::String(nb)
-                       : dropping ? "DROP: the chords of the first " + juce::String(nb) + " bars of this MIDI file" : juce::String();
+                       : dropping ? (droppingAudio ? juce::String("DROP: sustained notes as the SAMPLE sound (several files = one per register; a note name in the file name sets its pitch)")
+                                                   : juce::String("DROP: the chords of this MIDI file")) : juce::String();
         if (view.hasSelLink() && (view.selectedV() >= proc.score.nVoices || view.selectedT() >= proc.score.nSlots)) view.setSel(-2, -1);
     }
 
     LinkView view;
 private:
     ReChordProcessor& proc;
-    bool dropping = false;
+    bool dropping = false, droppingAudio = false;
+    std::unique_ptr<juce::FileChooser> chooser;
+    void pickSamples()
+    {
+        chooser = std::make_unique<juce::FileChooser>("Sustained notes for SAMPLE (one or several)", juce::File(), "*.wav;*.aif;*.aiff;*.flac");
+        chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
+                             [this](const juce::FileChooser& fc)
+                             {
+                                 juce::StringArray paths;
+                                 for (auto& f : fc.getResults()) paths.add(f.getFullPathName());
+                                 if (!paths.isEmpty()) proc.loadSamples(paths);
+                                 refresh();
+                             });
+    }
     ChordStrip strip;
     Picker picker;
     DragChip drag;

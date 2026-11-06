@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(ReChord VERSION 2.3.0)
+project(ReChord VERSION 2.4.0)
 set(CMAKE_CXX_STANDARD 17)
 
 include(FetchContent)
@@ -9,7 +9,7 @@ FetchContent_Declare(JUCE
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(ReChord
-    VERSION 2.3.0
+    VERSION 2.4.0
     COMPANY_NAME "Pouria Motabean"
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
@@ -55,6 +55,10 @@ if (RECHORD_SHOT)
     target_sources(rechord_shot PRIVATE tools/shot.cpp Source/PluginProcessor.cpp)
     target_compile_definitions(rechord_shot PRIVATE HAS_ASSETS=1 RECHORD_VERSION=\"${PROJECT_VERSION}\" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
     target_link_libraries(rechord_shot PRIVATE ReChordAssets juce::juce_audio_utils juce::juce_audio_formats juce::juce_recommended_config_flags)
+    juce_add_console_app(rechord_sample PRODUCT_NAME "rechord_sample")
+    target_sources(rechord_sample PRIVATE tools/sample_test.cpp Source/PluginProcessor.cpp)
+    target_compile_definitions(rechord_sample PRIVATE HAS_ASSETS=1 RECHORD_VERSION=\"${PROJECT_VERSION}\" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(rechord_sample PRIVATE ReChordAssets juce::juce_audio_utils juce::juce_audio_formats juce::juce_recommended_config_flags)
     juce_add_console_app(rechord_learn PRODUCT_NAME "rechord_learn")
     target_sources(rechord_learn PRIVATE tools/learn_sim.cpp Source/PluginProcessor.cpp)
     target_compile_definitions(rechord_learn PRIVATE HAS_ASSETS=1 RECHORD_VERSION=\"${PROJECT_VERSION}\" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)

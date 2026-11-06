@@ -18,7 +18,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
         p.push_back(std::make_unique<APF>(PID { id, 1 }, name, r, def,
                                           juce::AudioParameterFloatAttributes().withStringFromValueFunction(txt)));
     };
-    p.push_back(std::make_unique<juce::AudioParameterChoice>(PID { "osc", 1 }, "Sound", juce::StringArray { "FM", "Analog", "Strings", "Voice", "EP", "Sine", "Keys", "Bowed", "808" }, 0));
+    p.push_back(std::make_unique<juce::AudioParameterChoice>(PID { "osc", 1 }, "Sound", juce::StringArray { "FM", "Analog", "Strings", "Voice", "EP", "Sine", "Keys", "Bowed", "808", "Sample" }, 0));
     fl("character", "Character", 0.f, 1.f, 0.45f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
     fl("attack", "Attack", 2.f, 1500.f, 35.f, 120.f, msText);
     fl("bright", "Bright", 0.f, 1.f, 0.45f, 0, [](float v, int) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
@@ -245,6 +245,14 @@ void ReChordProcessor::timerCallback()
     const int nv = (int) apvts.getRawParameterValue("voices")->load();
     if (nv != lastVoices) smart();
     if (learnState.load() == 3) finishLearn();
+    // SAMPLE: CHARACTER = the loop's length; the loop is cut again a moment after the knob stops
+    if ((int) apvts.getRawParameterValue("osc")->load() == rc::OscSample && !samples.empty())
+    {
+        const float c = apvts.getRawParameterValue("character")->load();
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        if (std::abs(c - seenChar) > 0.0005f) { seenChar = c; charAt = now; }
+        else if (std::abs(c - builtLoop) > 0.004f && now - charAt > 300.0) rebuildSamples();
+    }
 }
 
 void ReChordProcessor::prepareToPlay(double sampleRate, int)
@@ -261,6 +269,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     {
         const juce::SpinLock::ScopedTryLockType sl(scoreLock);
         if (sl.isLocked() && scoreDirty) { engine.setScore(audioScore); scoreDirty = false; }
+        if (sl.isLocked() && sampleDirty) { engine.setSample(pendingSample); sampleDirty = false; }
     }
     engine.setParams(currentParams());
 
@@ -390,7 +399,7 @@ juce::File ReChordProcessor::renderWav()
     const double sr = getSampleRate() > 8000 ? getSampleRate() : 48000.0;
     const double bpm = hostBpm.load(), barBeats = hostBarBeats.load();
     std::vector<float> L, R;
-    rc::renderPattern(score, currentParams(), sr, bpm, barBeats, L, R);
+    rc::renderPattern(score, currentParams(), sr, bpm, barBeats, L, R, sampleSet);
 
     juce::String names;
     for (int i = 0; i < score.nSlots; ++i) names << (i ? "-" : "") << slotName(i).replace("#", "s");
@@ -622,6 +631,31 @@ void ReChordProcessor::getStateInformation(juce::MemoryBlock& dest)
     m.setProperty("links", links.trim(), nullptr);
     st.removeChild(st.getChildWithName("model2"), nullptr);
     st.appendChild(m, nullptr);
+    // the samples go inside the project (16-bit WAV), so it opens the same on any computer
+    st.removeChild(st.getChildWithName("samples"), nullptr);
+    if (!samples.empty())
+    {
+        juce::ValueTree sm("samples");
+        for (auto& src : samples)
+        {
+            juce::MemoryBlock mb;
+            {
+                auto os = std::make_unique<juce::MemoryOutputStream>(mb, false);
+                juce::WavAudioFormat wav;
+                if (auto* w = wav.createWriterFor(os.get(), src.rate, 2, 16, {}, 0))
+                {
+                    os.release();
+                    std::unique_ptr<juce::AudioFormatWriter> writer(w);
+                    writer->writeFromAudioSampleBuffer(src.audio, 0, src.audio.getNumSamples());
+                }
+            }
+            juce::ValueTree one("sample");
+            one.setProperty("name", src.name, nullptr);
+            one.setProperty("wav", mb.toBase64Encoding(), nullptr);
+            sm.appendChild(one, nullptr);
+        }
+        st.appendChild(sm, nullptr);
+    }
     if (auto xml = st.createXml()) copyXmlToBinary(*xml, dest);
 }
 
@@ -633,7 +667,27 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
     auto m = st.getChildWithName("model2");
     st.removeChild(m, nullptr);
     st.removeChild(st.getChildWithName("model"), nullptr);
+    {
+        const auto sm = st.getChildWithName("samples");
+        st.removeChild(sm, nullptr);
+        samples.clear();
+        for (int i = 0; sm.isValid() && i < sm.getNumChildren(); ++i)
+        {
+            const auto one = sm.getChild(i);
+            juce::MemoryBlock mb;
+            if (!mb.fromBase64Encoding(one.getProperty("wav").toString())) continue;
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::AudioFormatReader> r(wav.createReaderFor(new juce::MemoryInputStream(mb, true), true));
+            if (r == nullptr || r->lengthInSamples < 100) continue;
+            SampleSrc src; src.name = one.getProperty("name").toString(); src.rate = r->sampleRate;
+            src.audio.setSize(2, (int) r->lengthInSamples);
+            r->read(&src.audio, 0, (int) r->lengthInSamples, 0, true, true);
+            samples.push_back(std::move(src));
+        }
+    }
     apvts.replaceState(st);
+    builtLoop = -1.f;
+    rebuildSamples();
     if (!m.isValid()) { smart(); return; }
     presetIndex = juce::jlimit(0, rc::kNumPresets - 1, (int) m.getProperty("preset", 0));
 
@@ -766,4 +820,77 @@ void ReChordProcessor::applyMove(int kind)
     }
     score.edited = true;
     publish();
+}
+
+// ---------------- 2.4: SAMPLE ----------------
+int ReChordProcessor::loadSamples(const juce::StringArray& files)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::vector<SampleSrc> got;
+    for (auto& path : files)
+    {
+        const juce::File f(path);
+        std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(f));
+        if (r == nullptr || r->lengthInSamples < (juce::int64) (r->sampleRate * 0.15)) continue;
+        const int n = (int) std::min<juce::int64>(r->lengthInSamples, (juce::int64) (r->sampleRate * 20.0));   // 20 s is plenty
+        SampleSrc src; src.name = f.getFileNameWithoutExtension(); src.rate = r->sampleRate;
+        src.audio.setSize(2, n);
+        r->read(&src.audio, 0, n, 0, true, true);                       // mono files: the same on both sides
+        got.push_back(std::move(src));
+        if (got.size() >= 8) break;
+    }
+    if (got.empty()) return 0;
+    samples = std::move(got);
+    builtLoop = -1.f;
+    rebuildSamples();
+    if (sampleSet == nullptr || sampleSet->zones.empty()) return 0;
+    // the file as it is: full brightness, no vibrato of our own
+    auto set = [this](const char* id, float v) { auto* p = apvts.getParameter(id); p->beginChangeGesture(); p->setValueNotifyingHost(p->convertTo0to1(v)); p->endChangeGesture(); };
+    set("osc", (float) rc::OscSample);
+    set("bright", 1.f);
+    set("vibrato", 0.f);
+    return (int) sampleSet->zones.size();
+}
+
+void ReChordProcessor::clearSamples()
+{
+    samples.clear();
+    rebuildSamples();
+}
+
+void ReChordProcessor::rebuildSamples()
+{
+    const float loop = apvts.getRawParameterValue("character")->load();
+    auto set = std::make_shared<rc::SampleSet>();
+    for (auto& src : samples)
+    {
+        const int n = src.audio.getNumSamples();
+        std::vector<float> L((size_t) n), R((size_t) n);
+        for (int i = 0; i < n; ++i) { L[(size_t) i] = src.audio.getSample(0, i); R[(size_t) i] = src.audio.getSample(1, i); }
+        rc::SampleZone z;
+        if (rc::buildZone(z, L, R, src.rate, src.name.toStdString(), loop)) set->zones.push_back(std::move(z));
+    }
+    std::sort(set->zones.begin(), set->zones.end(), [](const rc::SampleZone& a, const rc::SampleZone& b) { return a.root < b.root; });
+    builtLoop = loop; seenChar = loop;
+    sampleOld = sampleSet;                        // kept one round, so the audio thread never frees it
+    sampleSet = set->zones.empty() ? nullptr : std::shared_ptr<const rc::SampleSet>(set);
+    const juce::SpinLock::ScopedLockType sl(scoreLock);
+    pendingSample = sampleSet;
+    sampleDirty = true;
+}
+
+juce::String ReChordProcessor::sampleLabel() const
+{
+    if (sampleSet == nullptr || sampleSet->zones.empty()) return "drop a WAV here";
+    if (sampleSet->zones.size() == 1) return juce::String(sampleSet->zones[0].name);
+    return juce::String((int) sampleSet->zones.size()) + " samples";
+}
+
+juce::String ReChordProcessor::sampleDetail() const
+{
+    if (sampleSet == nullptr) return "SAMPLE";
+    juce::String s;
+    for (auto& z : sampleSet->zones) s << (s.isEmpty() ? juce::String() : juce::String::fromUTF8(" \xc2\xb7 ")) << juce::String(rc::noteName((int) std::lround(z.root)));
+    return "SAMPLE  " + s;
 }

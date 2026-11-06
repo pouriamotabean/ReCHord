@@ -89,6 +89,12 @@ int main(int argc, char** argv)
         auto f8 = proc.renderWav();
         std::printf("%lld bytes\n", (long long) f8.getSize());
     }
+    if (argc > 3)
+    {
+        juce::StringArray sf; for (int i = 3; i < argc; ++i) sf.add(argv[i]);
+        std::printf("samples: %d\n", proc.loadSamples(sf));
+        snap("l_sample.png");
+    }
     juce::MemoryBlock mb; proc.getStateInformation(mb);
     ReChordProcessor p2; p2.setStateInformation(mb.getData(), (int) mb.getSize());
     std::printf("state: preset %d osc %.0f character %.2f\n", p2.presetIndex, p2.apvts.getRawParameterValue("osc")->load(), p2.apvts.getRawParameterValue("character")->load());

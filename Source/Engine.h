@@ -8,9 +8,11 @@
 #include <cstring>
 #include <vector>
 
+#include "Sampler.h"
+
 namespace rc
 {
-enum OscType { OscFM = 0, OscAnalog = 1, OscStrings = 2, OscVoice = 3, OscTine = 4, OscSine = 5, OscKeys = 6, OscBowed = 7, Osc808 = 8, kNumOsc };
+enum OscType { OscFM = 0, OscAnalog = 1, OscStrings = 2, OscVoice = 3, OscTine = 4, OscSine = 5, OscKeys = 6, OscBowed = 7, Osc808 = 8, OscSample = 9, kNumOsc };
 
 struct Params
 {
@@ -247,6 +249,7 @@ public:
         bodies = BodyBank::get(sr);
     }
     void setScore(const Score& s) { score = s; cache.build(score); }
+    void setSample(std::shared_ptr<const SampleSet> s) { sample = std::move(s); }
     void setParams(const Params& p) { prm = p; }
 
     // ---- the keyboard: the notes now held (sorted, max 8). Each new chord glides from the last one ----
@@ -393,6 +396,7 @@ private:
         Svf fL, fR, form[3];
         float lpL1 = 0, lpL2 = 0, lpR1 = 0, lpR2 = 0;
         bool low = false, high = false;         // plays its octave copy (DOUBLE)
+        int zone = 0;                           // SAMPLE: the file it plays (the nearest when it started)
         unsigned order = 0, noise = 1;
     };
     struct Lane { int voice = -1; long long noteId = -1; };
@@ -426,6 +430,12 @@ private:
         v.noise = 1u + (unsigned) (rnd() * 1e6f);
         v.low = low; v.high = high;
         v.pan = nLanes > 1 && prm.osc != Osc808 ? ((float) lane / (float) (nLanes - 1) - 0.5f) * 0.5f : 0.f;   // low voices a bit left, high a bit right (808: centre)
+        if (prm.osc == OscSample && sample != nullptr && !sample->zones.empty())
+        {
+            v.zone = sample->nearest(pitch);
+            const double n = (double) sample->zones[(size_t) v.zone].len;
+            for (auto& p : v.ph) p *= n;          // SAMPLE: each voice from its own place in the loop
+        }
         if (continuing) { v.env = 1.f; v.age = 1.5f; }
         return best;
     }
@@ -439,8 +449,9 @@ private:
         const float ch = prm.character, br = prm.bright;
         const float f0 = 440.f * std::pow(2.f, (v.pitch - 69.f) / 12.f);
         const float dbl = prm.doubleAmt;
-        static const float oscGain[kNumOsc] = { 1.f, 1.6f, 1.9f, 0.95f, 1.1f, 1.0f, 1.2f, 1.38f, 1.0f };   // the 4 sounds at about the same loudness
+        static const float oscGain[kNumOsc] = { 1.f, 1.6f, 1.9f, 0.95f, 1.1f, 1.0f, 1.2f, 1.38f, 1.0f, 1.0f };   // the 4 sounds at about the same loudness
         const float og = oscGain[std::clamp(prm.osc, 0, kNumOsc - 1)];
+        if (prm.osc != OscSample) for (auto& ph : v.ph) if (ph >= 1.0) ph -= std::floor(ph);   // back from SAMPLE (its phases count samples)
 
         // per block: filters
         float fc = 0, q = 0.707f;
@@ -454,9 +465,10 @@ private:
             case OscKeys:
             case OscBowed:   fc = f0 * std::exp2(1.f + br * 9.f); break;
             case Osc808:     fc = f0 * (3.f + 40.f * br * br); break;    // BRIGHT 0.6..1 = the body as measured, lower = darker
+            case OscSample:  fc = 400.f * std::exp2(br * 8.f); break;    // BRIGHT 0.8..1 = the file as it is, lower = darker
             default:         fc = f0 * (3.f + 10.f * br); q = 0.6f; break;
         }
-        fc = std::clamp(fc, 180.f, (prm.osc == OscKeys || prm.osc == OscBowed) ? 20000.f : 16000.f);
+        fc = std::clamp(fc, 180.f, (prm.osc == OscKeys || prm.osc == OscBowed || prm.osc == OscSample) ? 20000.f : 16000.f);
         if (prm.osc == OscBowed) v.fR.set(std::clamp(f0 * 3.f, 600.f, 5000.f), 0.7f, sr);    // the bow: noise around the 3rd harmonic
         const float a = 1.f - std::exp(-2.f * 3.14159265f * fc / (float) sr);
         if (prm.osc != OscBowed) { v.fL.set(fc, q, sr); v.fR.set(fc, q, sr); }
@@ -614,6 +626,33 @@ private:
                     l = r = y * v.env;
                     v.lpL1 += a * (l - v.lpL1); v.lpL2 += a * (v.lpL1 - v.lpL2);
                     l = r = v.lpL2;
+                    break;
+                }
+                case OscSample:
+                {
+                    float sL = 0, sR = 0;
+                    if (sample != nullptr && !sample->zones.empty())
+                    {
+                        const auto& z = sample->zones[(size_t) std::min(v.zone, (int) sample->zones.size() - 1)];
+                        const double n = (double) z.len;
+                        const double ratio = std::exp2((p - z.root) / 12.0) * z.rate / sr;
+                        auto play = [&](double& ph, double r, float gain)
+                        {
+                            float a0, a1; z.read(ph, r, a0, a1);
+                            sL += a0 * gain; sR += a1 * gain;
+                            ph += r; while (ph >= n) ph -= n;
+                        };
+                        play(v.ph[0], ratio, 1.f);
+                        if (dbl > 0.001f)
+                        {
+                            if (v.low)  play(v.ph[3], ratio * 0.5, dbl * 0.8f);
+                            if (v.high) play(v.ph[4], ratio * 2.0, dbl * 0.4f);
+                        }
+                    }
+                    l = sL * v.env; r = sR * v.env;
+                    v.lpL1 += a * (l - v.lpL1); v.lpL2 += a * (v.lpL1 - v.lpL2);
+                    v.lpR1 += a * (r - v.lpR1); v.lpR2 += a * (v.lpR1 - v.lpR2);
+                    l = v.lpL2; r = v.lpR2;
                     break;
                 }
                 case OscKeys:
@@ -803,6 +842,7 @@ private:
     float echoLp[2] {}, echoHp[2] {};
     double tremPh = 0, curBpm = 120;
     std::shared_ptr<const BodyBank> bodies;
+    std::shared_ptr<const SampleSet> sample;
 };
 
 // the 4 bars as a WAV.
@@ -810,10 +850,11 @@ private:
 //  otherwise: the pattern from its first beat; ends that join the next / previous pattern get a 3 ms edge,
 //  an end with no next chord lets the notes ring out.
 inline void renderPattern(const Score& s, const Params& p, double sr, double bpm, double barBeats,
-                          std::vector<float>& outL, std::vector<float>& outR)
+                          std::vector<float>& outL, std::vector<float>& outR, std::shared_ptr<const SampleSet> smp = nullptr)
 {
     Engine e;
     e.prepare(sr);
+    e.setSample(std::move(smp));
     e.setScore(s);
     e.setParams(p);
     const double samplesPerBeat = sr * 60.0 / bpm;
