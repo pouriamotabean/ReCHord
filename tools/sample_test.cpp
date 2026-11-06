@@ -84,6 +84,16 @@ int main(int argc, char** argv)
         std::printf("stress done\n");
         proc.audition = -1;
     }
+    {
+        proc.samples[0].ed.stretch = 1.75f; proc.samples[0].ed.mode = 1; proc.rebuildSamples();
+        const bool ok = proc.saveUserPreset("Test Zen");
+        ReChordProcessor p3; p3.setRateAndBufferSizeDetails(48000, 512);
+        const bool ok2 = p3.loadUserPreset(ReChordProcessor::presetDir().getChildFile("Test Zen.rcpreset"));
+        std::printf("user preset: saved %d loaded %d name '%s' osc %.0f samples %d stretch %.2f mode %d zones %d\n", (int) ok, (int) ok2, p3.userPreset.toRawUTF8(),
+                    p3.apvts.getRawParameterValue("osc")->load(), (int) p3.samples.size(), p3.samples.empty() ? 0.f : p3.samples[0].ed.stretch,
+                    p3.samples.empty() ? -1 : p3.samples[0].ed.mode, p3.sampleSet ? (int) p3.sampleSet->zones.size() : 0);
+        proc.samples[0].ed = rc::SampleEdit(); proc.rebuildSamples();
+    }
     // the state round trip
     juce::MemoryBlock mb; proc.getStateInformation(mb);
     ReChordProcessor p2; p2.setRateAndBufferSizeDetails(48000, 512); p2.setStateInformation(mb.getData(), (int) mb.getSize());

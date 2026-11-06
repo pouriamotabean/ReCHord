@@ -1,8 +1,8 @@
 // simulate Cubase playing chords into ReChord while LEARN is on
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_formats/juce_audio_formats.h>
-#include "../Source/Presets.h"
 #define private public
+#include "../Source/Presets.h"
 #include "../Source/PluginProcessor.h"
 #undef private
 struct Head : juce::AudioPlayHead
@@ -29,6 +29,22 @@ int main(int argc, char** argv)
         const double a = b * 4.0 - (mode == 3 ? 0.04 : 0.0), e = b * 4.0 + (mode == 3 ? 4.1 : 3.9);
         evs.push_back({ std::max(0.0, a), k, true });
         if (mode != 1) evs.push_back({ e, k, false });
+    }
+    if (mode == 9)
+    {
+        // live: hold F A C, then add E: the new voice should grow out of C and glide up
+        head.playing = false;
+        juce::AudioBuffer<float> buf(2, bs);
+        auto block = [&](std::initializer_list<int> ons) { juce::MidiBuffer mb; for (int k : ons) mb.addEvent(juce::MidiMessage::noteOn(1, k, (juce::uint8) 100), 0); proc.processBlock(buf, mb); };
+        block({ 53, 57, 60 });
+        for (int i = 0; i < 40; ++i) block({});
+        block({ 64 });
+        for (int i = 0; i < 60; ++i)
+        {
+            block({});
+            if (i % 6 == 0) { std::printf("t+%3d ms:", (int) (i * bs / 48.0)); for (auto& L : proc.engine.live) if (L.voice >= 0) std::printf(" %.2f", L.cur); std::printf("\n"); }
+        }
+        return 0;
     }
     proc.startLearn();
     const double spb = sr * 60.0 / 120.0;

@@ -297,11 +297,30 @@ public:
             else
             {
                 const float p = (float) (notes[j - 1] + prm.liveShift);
+                // a note added to a chord that is already sounding grows out of the nearest note (below first) and glides in
+                float src = p; bool grow = false, below = false; float best = 1e9f;
+                for (int q = 0; q < no; ++q)
+                {
+                    const auto& O = live[oldLane[q]];
+                    if (O.voice < 0) continue;
+                    const float d = p - O.cur;
+                    const bool b = d >= 0;
+                    if ((b && !below) || (b == below && std::abs(d) < best)) { best = std::abs(d); src = O.cur; grow = true; below = b; }
+                }
+                if (grow && best > 12.f) grow = false;                // too far: just start there
                 for (auto& L : live)
                     if (L.voice < 0)
                     {
-                        L.voice = startVoice(p, false, p == lowest && n > 1, p == highest && n > 1, j - 1, n);
-                        L.from = L.to = L.cur = p; L.t = 1e9;
+                        if (grow)
+                        {
+                            L.voice = startVoice(src, false, p == lowest && n > 1, p == highest && n > 1, j - 1, n);
+                            L.from = L.cur = src; L.to = p; L.t = 0;
+                        }
+                        else
+                        {
+                            L.voice = startVoice(p, false, p == lowest && n > 1, p == highest && n > 1, j - 1, n);
+                            L.from = L.to = L.cur = p; L.t = 1e9;
+                        }
                         break;
                     }
                 --j;

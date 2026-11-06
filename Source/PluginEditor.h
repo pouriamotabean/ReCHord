@@ -1538,9 +1538,10 @@ public:
         const auto mid = r.reduced(26.f, 0.f);
         const bool smp = (int) proc.apvts.getRawParameterValue("osc")->load() == rc::OscSample;
         g.setColour(smp ? orange.withAlpha(0.8f) : faint); g.setFont(mono(7.5f));
-        g.drawText(smp ? proc.sampleDetail() : juce::String(ps.group), mid.withHeight(14.f).translated(0, 5.f), juce::Justification::centred);
+        const bool usr = proc.userPreset.isNotEmpty();
+        g.drawText(smp ? proc.sampleDetail() : usr ? juce::String("USER") : juce::String(ps.group), mid.withHeight(14.f).translated(0, 5.f), juce::Justification::centred);
         g.setColour(hover == 1 ? white : label.brighter(0.2f)); g.setFont(sans(13.f));
-        g.drawFittedText(smp ? proc.sampleLabel() : juce::String(ps.name) + (proc.presetModified() ? "  *" : ""), mid.withTrimmedTop(15.f).withTrimmedBottom(3.f).toNearestInt(), juce::Justification::centred, 1, 0.8f);
+        g.drawFittedText(usr ? proc.userPreset : smp ? proc.sampleLabel() : juce::String(ps.name) + (proc.presetModified() ? "  *" : ""), mid.withTrimmedTop(15.f).withTrimmedBottom(3.f).toNearestInt(), juce::Justification::centred, 1, 0.8f);
     }
     void mouseMove(const juce::MouseEvent& e) override { const int h = at(e.position); if (h != hover) { hover = h; repaint(); } }
     void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
@@ -1565,7 +1566,7 @@ class PresetPanel : public juce::Component
 public:
     explicit PresetPanel(ReChordProcessor& p) : proc(p) {}
     std::function<void()> onClose;
-    void visibilityChanged() override { if (isVisible()) tab = groupOf(proc.presetIndex); }
+    void visibilityChanged() override { if (isVisible()) { files = ReChordProcessor::userPresets(); tab = proc.userPreset.isNotEmpty() ? kUser : groupOf(proc.presetIndex); } }
     void paint(juce::Graphics& g) override
     {
         using namespace ui;
@@ -1575,20 +1576,37 @@ public:
         g.drawText("SOUNDS", juce::Rectangle<float>(18.f, 12.f, 100.f, 14.f), juce::Justification::centredLeft);
         g.setColour(faint); g.setFont(mono(8.5f));
         g.drawText("a preset changes only the sound - chords, connections and glides stay", juce::Rectangle<float>(100.f, 12.f, 500.f, 14.f), juce::Justification::centredLeft);
-        for (int t = 0; t < kGroups; ++t)
+        for (int t = 0; t < kGroups + 1; ++t)
         {
             const auto rr = tabCell(t);
-            const bool on = tab == t, hot = hover == 300 + t, cur = groupOf(proc.presetIndex) == t;
+            const bool on = tab == t, hot = hover == 300 + t, cur = proc.userPreset.isNotEmpty() ? t == kUser : groupOf(proc.presetIndex) == t;
             chipShape(g, rr, on, hot, 5.f);
             if (cur) { g.setColour(orange); g.fillRect(rr.getX() + 8.f, rr.getCentreY() - 2.5f, 5.f, 5.f); }
             g.setColour(on ? white : soft); g.setFont(mono(9.f, true));
-            g.drawText(groupName(t), rr.withTrimmedLeft(cur ? 8.f : 0.f), juce::Justification::centred);
+            g.drawText(t == kUser ? "USER" : groupName(t), rr.withTrimmedLeft(cur ? 8.f : 0.f), juce::Justification::centred);
+        }
+        if (tab == kUser)
+        {
+            // + SAVE, then the saved ones (x = delete)
+            for (int i = 0; i <= files.size(); ++i)
+            {
+                const auto cell = slot(i);
+                const bool on = i > 0 && proc.userPreset == files[i - 1].getFileNameWithoutExtension(), hot = hover == 1000 + i;
+                if (on) { g.setColour(orange); g.fillPath(chamfer(cell, 7.f, 2 | 8)); }
+                else chipShape(g, cell, hot, false, 7.f);
+                g.setColour(i == 0 ? (hot ? white : orange) : on || hot ? white : soft);
+                g.setFont(i == 0 ? mono(10.f, true) : inter(12.5f, on ? 600 : 500));
+                g.drawText(i == 0 ? juce::String("+  SAVE CURRENT SOUND") : files[i - 1].getFileNameWithoutExtension(), cell.reduced(14.f, 0.f), juce::Justification::centredLeft);
+                if (i > 0 && hot) { const auto x = delCell(i); g.setColour(hover2 ? white : dim); g.drawLine(x.getX() + 4, x.getY() + 4, x.getRight() - 4, x.getBottom() - 4, 1.2f); g.drawLine(x.getRight() - 4, x.getY() + 4, x.getX() + 4, x.getBottom() - 4, 1.2f); }
+            }
+            g.setColour(faint); g.setFont(mono(8.f));
+            g.drawText("saved in Documents / ReChord / Presets   -   a SAMPLE sound keeps its samples and their edits", juce::Rectangle<float>(18.f, (float) getHeight() - 22.f, (float) getWidth() - 36.f, 12.f), juce::Justification::centredLeft);
         }
         for (int i = 0; i < rc::kNumPresets; ++i)
         {
             if (groupOf(i) != tab) continue;
             const auto cell = item(i);
-            const bool on = proc.presetIndex == i, hot = hover == i;
+            const bool on = proc.userPreset.isEmpty() && proc.presetIndex == i, hot = hover == i;
             if (on) { g.setColour(orange); g.fillPath(chamfer(cell, 7.f, 2 | 8)); }
             else chipShape(g, cell, hot, false, 7.f);
             g.setColour(on ? juce::Colours::white : hot ? white : soft);
@@ -1600,22 +1618,61 @@ public:
         g.drawLine(x.getX() + 6, x.getY() + 6, x.getRight() - 6, x.getBottom() - 6, 1.4f);
         g.drawLine(x.getRight() - 6, x.getY() + 6, x.getX() + 6, x.getBottom() - 6, 1.4f);
     }
-    void mouseMove(const juce::MouseEvent& e) override { const int h = at(e.position); if (h != hover) { hover = h; repaint(); } }
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        const int h = at(e.position);
+        const bool h2 = h > 1000 && delCell(h - 1000).contains(e.position);
+        if (h != hover || h2 != hover2) { hover = h; hover2 = h2; repaint(); }
+    }
     void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
     void mouseDown(const juce::MouseEvent& e) override
     {
         const int h = at(e.position);
         if (h == 200) { if (onClose) onClose(); return; }
-        if (h >= 300) { tab = h - 300; repaint(); return; }
+        if (h == 1000) { askName(); return; }
+        if (h > 1000)
+        {
+            const auto f = files[h - 1001];
+            if (delCell(h - 1000).contains(e.position)) { f.moveToTrash(); if (proc.userPreset == f.getFileNameWithoutExtension()) proc.userPreset.clear(); }
+            else proc.loadUserPreset(f);
+            files = ReChordProcessor::userPresets(); repaint(); return;
+        }
+        if (h >= 300) { tab = h - 300; if (tab == kUser) files = ReChordProcessor::userPresets(); repaint(); return; }
         if (h >= 0) { proc.loadPreset(h); repaint(); }
     }
 private:
     ReChordProcessor& proc;
     int hover = -1, tab = 0;
-    static constexpr int kGroups = 9;
+    bool hover2 = false;
+    juce::Array<juce::File> files;
+    std::unique_ptr<juce::AlertWindow> ask;
+    static constexpr int kGroups = 9, kUser = 9;
+    void askName()
+    {
+        juce::String def = proc.userPreset.isNotEmpty() ? proc.userPreset
+                         : (int) proc.apvts.getRawParameterValue("osc")->load() == rc::OscSample && proc.hasSamples() ? proc.sampleLabel()
+                         : juce::String(rc::kPresets[proc.presetIndex].name) + " 2";
+        ask = std::make_unique<juce::AlertWindow>("Save sound", "Name of the preset:", juce::MessageBoxIconType::NoIcon, this);
+        ask->addTextEditor("name", def);
+        ask->addButton("SAVE", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        ask->addButton("CANCEL", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        ask->enterModalState(true, juce::ModalCallbackFunction::create([this](int r)
+        {
+            if (r == 1 && ask != nullptr) proc.saveUserPreset(ask->getTextEditorContents("name"));
+            files = ReChordProcessor::userPresets();
+            repaint();
+            juce::MessageManager::callAsync([sp = juce::Component::SafePointer<PresetPanel>(this)] { if (sp != nullptr) sp->ask.reset(); });
+        }), false);
+    }
+    juce::Rectangle<float> slot(int i) const
+    {
+        const float w = ((float) getWidth() - 36.f - 2 * 10.f) / 3.f;
+        return { 18.f + (i % 3) * (w + 10.f), 86.f + (i / 3) * 50.f, w, 42.f };
+    }
+    juce::Rectangle<float> delCell(int i) const { const auto c = slot(i); return { c.getRight() - 26.f, c.getCentreY() - 8.f, 16.f, 16.f }; }
     static const char* groupName(int c) { static const char* g[] = { "PIANO", "BOWED", "BASS", "EP", "DREAM", "LEADS", "STRINGS", "VOICES", "PADS" }; return g[c]; }
     static int groupOf(int i) { for (int k = 0; k < kGroups; ++k) if (juce::String(rc::kPresets[i].group) == groupName(k)) return k; return 0; }
-    juce::Rectangle<float> tabCell(int t) const { const float w = ((float) getWidth() - 36.f - (kGroups - 1) * 6.f) / (float) kGroups; return { 18.f + t * (w + 6.f), 40.f, w, 28.f }; }
+    juce::Rectangle<float> tabCell(int t) const { const float w = ((float) getWidth() - 36.f - kGroups * 6.f) / (float) (kGroups + 1); return { 18.f + t * (w + 6.f), 40.f, w, 28.f }; }
     juce::Rectangle<float> item(int i) const
     {
         int row = 0;
@@ -1627,7 +1684,8 @@ private:
     int at(juce::Point<float> p) const
     {
         if (closeCell().contains(p)) return 200;
-        for (int t = 0; t < kGroups; ++t) if (tabCell(t).contains(p)) return 300 + t;
+        for (int t = 0; t < kGroups + 1; ++t) if (tabCell(t).contains(p)) return 300 + t;
+        if (tab == kUser) { for (int i = 0; i <= files.size(); ++i) if (slot(i).contains(p)) return 1000 + i; return -1; }
         for (int i = 0; i < rc::kNumPresets; ++i) if (groupOf(i) == tab && item(i).contains(p)) return i;
         return -1;
     }
@@ -1984,8 +2042,9 @@ public:
         }
         learnB.setToggleState(proc.learnState.load() != 0, juce::dontSendNotification);
         const int nb = proc.pattern.activeBars();
-        view.learnText = proc.learnState.load() == 1 ? "LEARN: waiting for Cubase to play - the next bar line starts " + juce::String(nb) + " bars"
-                       : proc.learnState.load() == 2 ? "LEARN: listening, bar " + juce::String(juce::jlimit(1, nb, (int) proc.learnPos.load() + 1)) + " of " + juce::String(nb)
+        view.learnText = proc.learnState.load() == 1 ? juce::String("LEARN: waiting for Cubase to play - the bar of the first note becomes bar 1 (up to 8 bars)")
+                       : proc.learnState.load() == 2 ? (proc.learnPos.load() < 0 ? juce::String("LEARN: playing - waiting for the first note")
+                                                        : "LEARN: listening, bar " + juce::String(juce::jlimit(1, 8, (int) proc.learnPos.load() + 1)) + " (stop Cubase when the part is over)")
                        : dropping ? (droppingAudio ? juce::String("DROP: sustained notes as the SAMPLE sound (several files = one per register; a note name in the file name sets its pitch)")
                                                    : juce::String("DROP: the chords of this MIDI file")) : juce::String();
         if (view.hasSelLink() && (view.selectedV() >= proc.score.nVoices || view.selectedT() >= proc.score.nSlots)) view.setSel(-2, -1);

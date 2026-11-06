@@ -4,7 +4,7 @@
 #include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "2.5.2"
+ #define RECHORD_VERSION "2.5.3"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -76,6 +76,14 @@ public:
     // 2.4 SAMPLE: sustained notes from any synth (WAV / AIFF / FLAC); several files = a small multisample
     int loadSamples(const juce::StringArray& files);         // the files that loaded (replaces the set)
     void clearSamples();
+    // user presets (Documents/ReChord/Presets): the sound, and with SAMPLE the samples and their edits
+    juce::String userPreset;                                 // empty = a factory preset
+    static juce::File presetDir();
+    static juce::Array<juce::File> userPresets();
+    bool saveUserPreset(const juce::String& name);
+    bool loadUserPreset(const juce::File&);
+    juce::ValueTree samplesTree() const;
+    void samplesFromTree(const juce::ValueTree&);
     void rebuildNow() { rebuildSamples(); }
     juce::String sampleLabel() const;                        // for the preset box
     juce::String sampleDetail() const;                       // "C3 · F4 · A5"
