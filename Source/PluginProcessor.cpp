@@ -886,7 +886,8 @@ void ReChordProcessor::rebuildSamples()
     }
     std::sort(set->zones.begin(), set->zones.end(), [](const rc::SampleZone& a, const rc::SampleZone& b) { return a.root < b.root; });
     builtLoop = loop; seenChar = loop;
-    sampleOld = sampleSet;                        // kept one round, so the audio thread never frees it
+    sampleOld.push_back(sampleSet);               // kept a few rounds, so the audio thread never frees one
+    if (sampleOld.size() > 6) sampleOld.erase(sampleOld.begin());
     sampleSet = set->zones.empty() ? nullptr : std::shared_ptr<const rc::SampleSet>(set);
     const juce::SpinLock::ScopedLockType sl(scoreLock);
     pendingSample = sampleSet;

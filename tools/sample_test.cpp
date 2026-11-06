@@ -60,6 +60,30 @@ int main(int argc, char** argv)
         const auto& v = z.lv[0][0]; double avg = 0; for (int i = 1; i < z.len; ++i) avg += std::abs(v[(size_t) i] - v[(size_t) i - 1]); avg /= z.len;
         std::printf("  seam %s: step %.4f vs mean %.4f\n", z.name.c_str(), std::abs(v[0] - v[(size_t) z.len - 1]), avg);
     }
+    if (std::getenv("STRESS"))
+    {
+        // the edits a user makes, one after another, with a note playing through the audio thread
+        proc.apvts.getParameter("listen")->setValueNotifyingHost(1.f);
+        juce::AudioBuffer<float> buf(2, 512); juce::MidiBuffer mb;
+        auto play = [&](int blocks) { for (int b = 0; b < blocks; ++b) proc.processBlock(buf, mb); };
+        auto& ed = proc.samples[0].ed;
+        for (int mode = 0; mode < 2; ++mode)
+            for (float st = 1.f; st <= 4.01f; st += 0.25f)
+                for (float a : { -1.f, 0.05f, 0.3f, 0.7f })
+                {
+                    ed.mode = mode; ed.stretch = st; ed.a = a; ed.b = a < 0 ? -1 : std::min(1.1, a + 0.12 + st * 0.05);
+                    const double t0 = juce::Time::getMillisecondCounterHiRes();
+                    proc.rebuildSamples();
+                    const double t1 = juce::Time::getMillisecondCounterHiRes();
+                    proc.audition = 60 + (int) (st * 3);
+                    play(20);
+                    const double t2 = juce::Time::getMillisecondCounterHiRes();
+                    if (t1 - t0 > 50 || t2 - t1 > 100) std::printf("  slow: mode %d st %.2f a %.2f  rebuild %.0f ms, audio %.0f ms\n", mode, st, a, t1 - t0, t2 - t1);
+                    if (proc.sampleSet == nullptr) std::printf("  no set: mode %d st %.2f a %.2f\n", mode, st, a);
+                }
+        std::printf("stress done\n");
+        proc.audition = -1;
+    }
     // the state round trip
     juce::MemoryBlock mb; proc.getStateInformation(mb);
     ReChordProcessor p2; p2.setRateAndBufferSizeDetails(48000, 512); p2.setStateInformation(mb.getData(), (int) mb.getSize());

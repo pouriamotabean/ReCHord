@@ -301,7 +301,8 @@ inline bool buildZone(SampleZone& z, SampleInfo& info, const std::vector<float>&
     // the part: flattened, then stretched
     std::vector<float> L(inL.begin() + ia, inL.begin() + ib), R(inR.begin() + ia, inR.begin() + ib);
     flatten(L, R, rate);
-    const float st = std::clamp(ed.stretch, 1.f, 4.f);
+    float st = std::clamp(ed.stretch, 1.f, 4.f);
+    if ((double) L.size() * st > rate * 24.0) st = (float) std::max(1.0, rate * 24.0 / (double) L.size());   // keep the work small
     stretchWsola(L, R, st, period);
     const int M = (int) L.size();
     std::vector<float> m2((size_t) M);
@@ -321,20 +322,27 @@ inline bool buildZone(SampleZone& z, SampleInfo& info, const std::vector<float>&
         Lp = (int) std::lround(k * period);
         if (Lp * 2 + 8 > M) Lp = (int) std::lround(period * std::max(1, (int) ((M / 2 - 8) / period)));
         X = Lp;                                   // the loop crossfades fully with the periods just before it
-        s0 = std::clamp((M - Lp) / 2, X, M - Lp);
+        s0 = std::max(X, std::min((M - Lp) / 2, M - Lp));
         // the exact length: where one more period lines up best
         int best = Lp; double bc = -2;
-        for (int d = -3; d <= 3; ++d) { const int l2 = Lp + d; if (s0 + l2 + 64 > M) continue; const double c = ncorr(s0, s0 + l2, std::min(l2, 64 + (int) period)); if (c > bc) { bc = c; best = l2; } }
+        for (int d = -3; d <= 3; ++d)
+        {
+            const int l2 = Lp + d, w = std::min(l2, 64 + (int) period);
+            if (l2 < 32 || s0 + l2 + w > M) continue;
+            const double c = ncorr(s0, s0 + l2, w);
+            if (c > bc) { bc = c; best = l2; }
+        }
         Lp = best;
     }
     else
     {
         // LOOP: as long as the LOOP knob says; the end is moved to where it really matches the start
-        const double lmin = std::min(rate * 0.25, M * 0.4), lmax = M * 0.82;
+        const double lmin = std::min(rate * 0.25, M * 0.4), lmax = std::min(M * 0.82, rate * 8.0);   // 8 s of loop is plenty
         Lp = (int) (lmin + (lmax - lmin) * std::clamp(loopAmt, 0.f, 1.f));
         X = (int) std::clamp((double) Lp * std::clamp(ed.xfade, 0.05f, 0.5f), 64.0, (double) (M - Lp) - 2);
         if (X < 32) { X = std::min(Lp / 3, 32); Lp = std::max(64, M - X - 2); }
         s0 = X + std::max(0, (M - X - Lp) / 2);
+        if (s0 + Lp > M) Lp = M - s0;
         const int w = std::min(X, 4096);
         const int range = (int) std::clamp(period > 2 ? period * 1.5 : 300.0, 32.0, 2000.0);
         int best = Lp; double bc = -2;
@@ -347,7 +355,8 @@ inline bool buildZone(SampleZone& z, SampleInfo& info, const std::vector<float>&
         }
         Lp = best;
     }
-    if (Lp < 32 || s0 - X < 0 || s0 + Lp > M) return false;
+    X = std::min(X, Lp);                         // the seam never longer than the loop (CYCLE moves Lp after X was set)
+    if (Lp < 32 || X < 1 || s0 - X < 0 || s0 + Lp > M) return false;
     info.loopA = a + (double) s0 / st / rate; info.loopB = a + (double) (s0 + Lp) / st / rate;
 
     z.name = name; z.rate = rate; z.len = Lp; z.root = root;
