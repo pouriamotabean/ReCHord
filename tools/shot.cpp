@@ -107,5 +107,7 @@ int main(int argc, char** argv)
     auto f = proc.renderWav();
     std::printf("wav: %s (%lld bytes) in %.0f ms\n", f.getFullPathName().toRawUTF8(), (long long) f.getSize(), juce::Time::getMillisecondCounterHiRes() - t0);
     ed.reset();
+    for (int k = 0; k < 6; ++k) { std::unique_ptr<juce::AudioProcessorEditor> e2(proc.createEditor()); e2->setSize(960, 654); (void) e2->createComponentSnapshot(e2->getLocalBounds()); }
+    std::printf("editor opened and closed 6 times\n");
     return 0;
 }

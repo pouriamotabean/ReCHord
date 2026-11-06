@@ -4,7 +4,7 @@
 #include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "2.5.3"
+ #define RECHORD_VERSION "2.5.4"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer

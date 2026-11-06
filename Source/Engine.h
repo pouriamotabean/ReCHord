@@ -30,6 +30,7 @@ struct Params
     int transpose = 0;            // pattern: transpose + octave (semitones)
     int liveShift = 0;            // keyboard: octave (semitones)
     float liveGlideMs = 250.f;    // keyboard: time to glide from one chord to the next
+    bool addGlide = true;         // keyboard: a note added to a held chord glides in from the nearest note (false: starts on its key)
     float volumeDb = -6.f;
 };
 
@@ -307,7 +308,7 @@ public:
                     const bool b = d >= 0;
                     if ((b && !below) || (b == below && std::abs(d) < best)) { best = std::abs(d); src = O.cur; grow = true; below = b; }
                 }
-                if (grow && best > 12.f) grow = false;                // too far: just start there
+                if (grow && (best > 12.f || !prm.addGlide)) grow = false;   // too far, or GLIDE IN off: just start there
                 for (auto& L : live)
                     if (L.voice < 0)
                     {

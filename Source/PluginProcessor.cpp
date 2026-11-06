@@ -38,6 +38,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout ReChordProcessor::layout()
         juce::AudioParameterIntAttributes().withStringFromValueFunction([](int v, int) { return v == 1 ? juce::String("1 bass") : v == 2 ? juce::String("2 bass") : juce::String(v); })));
     fl("volume", "Volume", -30.f, 6.f, rc::kPresets[0].volumeDb, 0, [](float v, int) { return juce::String(v, 1) + " dB"; });
     p.push_back(std::make_unique<juce::AudioParameterBool>(PID { "listen", 1 }, "Listen", false));
+    p.push_back(std::make_unique<juce::AudioParameterBool>(PID { "addGlide", 1 }, "Added note glides in", true));
     return { p.begin(), p.end() };
 }
 
@@ -68,6 +69,7 @@ rc::Params ReChordProcessor::currentParams() const
     p.transpose = (int) v("transpose") + 12 * (int) v("octave");
     p.liveShift = 12 * (int) v("octave");
     p.liveGlideMs = v("liveGlide");
+    p.addGlide = v("addGlide") > 0.5f;
     p.volumeDb = v("volume");
     return p;
 }

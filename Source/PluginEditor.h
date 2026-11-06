@@ -19,10 +19,19 @@ static const juce::Colour white(0xffeeebe6), dim(0xff8c8a86), faint(0xff5f5d5a),
                           card(0xff121212), orange(0xffee6f2d), label(0xffc9c6c0), soft(0xffaeaba6),
                           copper(0xffbf6c3b), frame(0xff1c1c1c), well(0xff0f0f0f);
 
+// 2.5.4: fonts and the texture belong to the open editors (a SharedResourcePointer the editor holds), and are
+// let go when the last editor closes - static ones outlived JUCE / DirectWrite / Direct2D when Cubase unloaded
+// the plugin, which can hang the host on the way out.
+struct Res
+{
+    juce::Typeface::Ptr t[10];
+    juce::Image tex;
+};
 #if HAS_ASSETS
 inline juce::Typeface::Ptr face(int i)
 {
-    static juce::Typeface::Ptr t[10];
+    juce::SharedResourcePointer<Res> res;
+    auto& t = res->t;
     if (t[i] == nullptr)
     {
         const void* d = nullptr; int n = 0;
@@ -107,12 +116,13 @@ inline juce::Path chamfer(juce::Rectangle<float> r, float c, int mask = 15)
 }
 
 // the metal: grain, horizontal brushing, scratches and pits - the same every time (fixed seed), made once
-inline const juce::Image& metalTexture()
+inline juce::Image metalTexture()
 {
-    static juce::Image img;
+    juce::SharedResourcePointer<Res> res;
+    auto& img = res->tex;
     if (img.isValid()) return img;
     const int W = 1024, H = 1024;
-    img = juce::Image(juce::Image::ARGB, W, H, true);
+    img = juce::Image(juce::Image::ARGB, W, H, true, juce::SoftwareImageType());
     juce::Random rnd(20261106);
     std::vector<float> row((size_t) W);
     {
@@ -1351,6 +1361,48 @@ private:
     double downA = 0, downB = 0;
 };
 
+// 2.5.4: keyboard - a note added to a held chord: GLIDE IN (from the nearest note) or STRAIGHT (on its key)
+class AddSwitch : public juce::Component
+{
+public:
+    explicit AddSwitch(ReChordProcessor& p) : proc(p) {}
+    void paint(juce::Graphics& g) override
+    {
+        using namespace ui;
+        const bool on = proc.apvts.getRawParameterValue("addGlide")->load() > 0.5f;
+        g.setColour(label); g.setFont(mono(9.5f, true));
+        g.drawText("ADDED NOTE", juce::Rectangle<float>(0, 0, (float) getWidth(), 16.f), juce::Justification::centred);
+        const char* n[] = { "GLIDE IN", "STRAIGHT" };
+        for (int i = 0; i < 2; ++i)
+        {
+            const auto r = cell(i);
+            const bool sel = (i == 0) == on;
+            bevelRect(g, r, 6.f, sel ? juce::Colour(0xff232323) : hover == i ? juce::Colour(0xff1e1e1e) : juce::Colour(0xff181818), false, 0.2f);
+            if (sel) { g.setColour(orange); g.fillEllipse(r.getX() + 8.f, r.getCentreY() - 3.f, 6.f, 6.f); }
+            g.setColour(sel || hover == i ? white : label); g.setFont(mono(8.5f, true));
+            g.drawText(n[i], r.withTrimmedLeft(sel ? 10.f : 0.f), juce::Justification::centred);
+        }
+        g.setColour(faint); g.setFont(mono(7.5f));
+        g.drawText("keyboard: 1-2 keys over a chord", juce::Rectangle<float>(0, (float) getHeight() - 14.f, (float) getWidth(), 12.f), juce::Justification::centred);
+    }
+    void mouseMove(const juce::MouseEvent& e) override { const int h = cell(0).contains(e.position) ? 0 : cell(1).contains(e.position) ? 1 : -1; if (h != hover) { hover = h; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        for (int i = 0; i < 2; ++i)
+            if (cell(i).contains(e.position))
+            {
+                auto* p = proc.apvts.getParameter("addGlide");
+                p->beginChangeGesture(); p->setValueNotifyingHost(i == 0 ? 1.f : 0.f); p->endChangeGesture();
+                repaint();
+            }
+    }
+private:
+    juce::Rectangle<float> cell(int i) const { return { 6.f, 22.f + i * 28.f, (float) getWidth() - 12.f, 24.f }; }
+    ReChordProcessor& proc;
+    int hover = -1;
+};
+
 class MovePad : public juce::Component
 {
 public:
@@ -1830,7 +1882,7 @@ public:
         refresh();
     }
     explicit Device(ReChordProcessor& p)
-        : proc(p), view(p), strip(p), picker(p), drag(p), mode(p), move(p), sampleEd(p), type(p), presetBox(p), presets(p),
+        : proc(p), view(p), strip(p), picker(p), drag(p), mode(p), move(p), addSw(p), sampleEd(p), type(p), presetBox(p), presets(p),
           kChar(p, "character", "CHARACTER"), kAttack(p, "attack", "ATTACK"), kBright(p, "bright", "BRIGHT"), kVib(p, "vibrato", "VIBRATO"),
           kRel(p, "release", "RELEASE"), kWarm(p, "warmth", "WARMTH"), kSpace(p, "space", "SPACE"),
           kSpread(p, "spread", "SPREAD"), kDouble(p, "double", "DOUBLE"),
@@ -1919,6 +1971,7 @@ public:
         redoB.setTooltip("Redo (Ctrl+Shift+Z / Ctrl+Y)");
         addAndMakeVisible(undoB); addAndMakeVisible(redoB);
         addChildComponent(move);
+        addChildComponent(addSw);
         addChildComponent(sampleEd);
         addChildComponent(sampleB);
         sampleB.onClick = [this] { proc.audition = -1; openSample(!showSample); };
@@ -1978,12 +2031,7 @@ public:
         vline(140.f, 500.f, 632.f);
         g.setColour(faint.withAlpha(0.6f)); g.setFont(mono(7.f));
         g.drawText("v" RECHORD_VERSION, juce::Rectangle<float>(840.f, 630.f, 96.f, 10.f), juce::Justification::centredRight);
-        if (tabs.current == 1)
-        {
-            g.setColour(faint); g.setFont(mono(8.f));
-            g.drawText("one glide: its handles", juce::Rectangle<float>(780.f, 548.f, 160.f, 12.f), juce::Justification::centredLeft);
-            g.drawText("KEYBOARD: played chords", juce::Rectangle<float>(780.f, 566.f, 160.f, 12.f), juce::Justification::centredLeft);
-        }
+
     }
     void resized() override
     {
@@ -2031,6 +2079,7 @@ public:
         drag.repaint();
         smartB.setToggleState(!proc.score.edited, juce::dontSendNotification);
         undoB.setEnabled(proc.canUndo()); redoB.setEnabled(proc.canRedo());
+        if (addSw.isVisible()) addSw.repaint();
         {
             const bool smp = (int) proc.apvts.getRawParameterValue("osc")->load() == rc::OscSample;
             if (!smp && showSample) { showSample = false; proc.audition = -1; }
@@ -2073,6 +2122,7 @@ private:
     DragChip drag;
     ModeSwitch mode;
     MovePad move;
+    AddSwitch addSw;
     juce::TextButton undoB { "UNDO" }, redoB { "REDO" };
     SampleEditor sampleEd;
     juce::TextButton sampleB { "SAMPLE EDIT" };
@@ -2095,6 +2145,8 @@ private:
         for (auto* c : glide) c->setVisible(tabs.current == 1);
         move.setVisible(tabs.current == 1);
         move.setBounds(540, 504, 230, 124);
+        addSw.setVisible(tabs.current == 1);
+        addSw.setBounds(782, 508, 150, 118);
         for (auto* c : key) c->setVisible(tabs.current == 2);
         auto& list = tabs.current == 0 ? sound : tabs.current == 1 ? glide : key;
         const float step = list.size() <= 4 ? 118.f : 98.f;
@@ -2126,7 +2178,13 @@ public:
         setSize(960, 654);
         startTimerHz(30);
     }
-    ~ReChordEditor() override { tooltips.setLookAndFeel(nullptr); setLookAndFeel(nullptr); }
+    ~ReChordEditor() override
+    {
+        stopTimer();
+        proc.audition = -1;
+        tooltips.setLookAndFeel(nullptr);
+        setLookAndFeel(nullptr);
+    }
     void resized() override { device.setTransform(juce::AffineTransform::scale((float) getWidth() / 960.f)); }
     void paint(juce::Graphics& g) override { g.fillAll(juce::Colours::black); }
 
@@ -2145,6 +2203,7 @@ private:
         }
     }
     ReChordProcessor& proc;
+    juce::SharedResourcePointer<ui::Res> resources;       // first: the last thing to go
     ui::Look look;
     juce::TooltipWindow tooltips { this, 600 };
     Device device;
