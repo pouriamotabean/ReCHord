@@ -253,6 +253,7 @@ void ReChordProcessor::timerCallback()
         if (std::abs(c - seenChar) > 0.0005f) { seenChar = c; charAt = now; }
         else if (std::abs(c - builtLoop) > 0.004f && now - charAt > 300.0) rebuildSamples();
     }
+    if (editPending && juce::Time::getMillisecondCounterHiRes() - editAt > 120.0) { editPending = false; rebuildSamples(); }
 }
 
 void ReChordProcessor::prepareToPlay(double sampleRate, int)
@@ -366,6 +367,11 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     {
         graceLeft -= n;
         if (graceLeft <= 0) engine.setLive(nullptr, 0);
+    }
+    if (const int au = audition.load(); au != lastAudition)
+    {
+        if (au >= 0) { int k = au; engine.setLive(&k, 1); } else engine.setLive(nullptr, 0);
+        lastAudition = au;
     }
 
     // ---- LEARN: armed -> records from the next bar line for 4 bars of Cubase playback ----
@@ -651,6 +657,9 @@ void ReChordProcessor::getStateInformation(juce::MemoryBlock& dest)
             }
             juce::ValueTree one("sample");
             one.setProperty("name", src.name, nullptr);
+            one.setProperty("a", src.ed.a, nullptr); one.setProperty("b", src.ed.b, nullptr);
+            one.setProperty("stretch", src.ed.stretch, nullptr); one.setProperty("xfade", src.ed.xfade, nullptr);
+            one.setProperty("mode", src.ed.mode, nullptr); one.setProperty("fix", src.ed.fix, nullptr);
             one.setProperty("wav", mb.toBase64Encoding(), nullptr);
             sm.appendChild(one, nullptr);
         }
@@ -680,6 +689,9 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
             std::unique_ptr<juce::AudioFormatReader> r(wav.createReaderFor(new juce::MemoryInputStream(mb, true), true));
             if (r == nullptr || r->lengthInSamples < 100) continue;
             SampleSrc src; src.name = one.getProperty("name").toString(); src.rate = r->sampleRate;
+            src.ed.a = (double) one.getProperty("a", -1.0); src.ed.b = (double) one.getProperty("b", -1.0);
+            src.ed.stretch = (float) (double) one.getProperty("stretch", 1.0); src.ed.xfade = (float) (double) one.getProperty("xfade", 0.3);
+            src.ed.mode = (int) one.getProperty("mode", 0); src.ed.fix = (int) one.getProperty("fix", 0);
             src.audio.setSize(2, (int) r->lengthInSamples);
             r->read(&src.audio, 0, (int) r->lengthInSamples, 0, true, true);
             samples.push_back(std::move(src));
@@ -842,6 +854,7 @@ int ReChordProcessor::loadSamples(const juce::StringArray& files)
     }
     if (got.empty()) return 0;
     samples = std::move(got);
+    sampleSel = 0;
     builtLoop = -1.f;
     rebuildSamples();
     if (sampleSet == nullptr || sampleSet->zones.empty()) return 0;
@@ -869,7 +882,7 @@ void ReChordProcessor::rebuildSamples()
         std::vector<float> L((size_t) n), R((size_t) n);
         for (int i = 0; i < n; ++i) { L[(size_t) i] = src.audio.getSample(0, i); R[(size_t) i] = src.audio.getSample(1, i); }
         rc::SampleZone z;
-        if (rc::buildZone(z, L, R, src.rate, src.name.toStdString(), loop)) set->zones.push_back(std::move(z));
+        if (rc::buildZone(z, src.info, L, R, src.rate, src.name.toStdString(), src.ed, loop)) set->zones.push_back(std::move(z));
     }
     std::sort(set->zones.begin(), set->zones.end(), [](const rc::SampleZone& a, const rc::SampleZone& b) { return a.root < b.root; });
     builtLoop = loop; seenChar = loop;

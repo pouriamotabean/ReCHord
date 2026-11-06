@@ -498,8 +498,8 @@ public:
         else
         {
             g.setColour(dim.darker(0.2f)); g.setFont(mono(8.5f));
-            g.drawText(ui::U("glide: drag a line   |   curve: drag the middle   |   reconnect: line end → note   |   glide / end: click a line   |   reset: double-click"),
-                       juce::Rectangle<float>(0.f, r.getBottom() - 21.f, r.getWidth() - 150.f, 14.f), juce::Justification::centred);
+            g.drawFittedText(ui::U("glide: drag a line  |  curve: the middle  |  reconnect: end → note  |  on / off: click  |  reset: double-click"),
+                             juce::Rectangle<float>(8.f, r.getBottom() - 21.f, r.getWidth() - 400.f, 14.f).toNearestInt(), juce::Justification::centred, 1, 0.75f);
         }
     }
 
@@ -1126,6 +1126,208 @@ private:
 // glide mode: SMOOTH / STEPS / ROBOT (one parameter, three segments)
 // -----------------------------------------------------------------------------------------------------
 // 2.3: movement presets - how the voices move on every glide
+// 2.5: SAMPLE EDIT - the part of the file that plays, its stretch, the seam, the root
+class SampleEditor : public juce::Component
+{
+public:
+    explicit SampleEditor(ReChordProcessor& p) : proc(p) {}
+    std::function<void()> onChange;
+    void paint(juce::Graphics& g) override
+    {
+        using namespace ui;
+        const auto r = getLocalBounds().toFloat();
+        panel(g, r.reduced(1.f), 12.f, screen, true);
+        if (proc.samples.empty())
+        {
+            g.setColour(dim); g.setFont(mono(10.f));
+            g.drawText("drop a WAV of a held note here (or click SAMPLE again)", r, juce::Justification::centred);
+            return;
+        }
+        auto& src = cur();
+        const auto& in = src.info;
+        // the files
+        for (int i = 0; i < (int) proc.samples.size(); ++i)
+        {
+            const auto t = tab(i);
+            const bool on = i == proc.sampleSel;
+            g.setColour(juce::Colour(on ? 0xff232323 : hover == 10 + i ? 0xff1d1d1d : 0xff171717)); g.fillRoundedRectangle(t, 5.f);
+            if (on) { g.setColour(orange); g.fillRect(t.getX() + 1.f, t.getY() + 5.f, 2.f, t.getHeight() - 10.f); }
+            g.setColour(on ? white : label); g.setFont(mono(8.5f, on));
+            g.drawFittedText(proc.samples[(size_t) i].name + "  " + juce::String(rc::noteName((int) std::lround(proc.samples[(size_t) i].info.root))),
+                             t.reduced(8.f, 0.f).toNearestInt(), juce::Justification::centred, 1, 0.7f);
+        }
+        // buttons on the right
+        const char* bn[] = { "LOOP", "CYCLE", "AUTO", "PLAY", "REMOVE" };
+        for (int i = 0; i < 5; ++i)
+        {
+            const auto b = btn(i);
+            const bool on = (i == 0 && src.ed.mode == 0) || (i == 1 && src.ed.mode == 1) || (i == 3 && proc.audition.load() >= 0);
+            g.setColour(juce::Colour(on ? 0xff252525 : hover == 20 + i ? 0xff202020 : 0xff181818)); g.fillRoundedRectangle(b, 5.f);
+            g.setColour(juce::Colours::black.withAlpha(0.6f)); g.drawRoundedRectangle(b, 5.f, 1.f);
+            if (on) { g.setColour(orange); g.fillEllipse(b.getX() + 7.f, b.getCentreY() - 2.5f, 5.f, 5.f); }
+            g.setColour(on ? white : label); g.setFont(mono(8.5f, true));
+            g.drawText(bn[i], b.withTrimmedLeft(on ? 8.f : 0.f), juce::Justification::centred);
+        }
+        // the waveform
+        const auto w = wave();
+        g.setColour(juce::Colour(0xff0a0a0a)); g.fillRoundedRectangle(w.expanded(4.f, 4.f), 6.f);
+        const int n = src.audio.getNumSamples();
+        const double len = n / src.rate;
+        const float xa = xOf(in.a), xb = xOf(in.b), la = xOf(in.loopA), lb = xOf(in.loopB);
+        g.setColour(orange.withAlpha(0.08f)); g.fillRect(juce::Rectangle<float>(xa, w.getY(), xb - xa, w.getHeight()));
+        const int cols = (int) w.getWidth();
+        float pk = 1e-4f;                                   // the waveform fills the height, quiet files too
+        for (int i = 0; i < n; i += 4) pk = std::max(pk, std::abs(0.5f * (src.audio.getSample(0, i) + src.audio.getSample(1, i))));
+        const float sc = 0.48f / pk;
+        for (int c = 0; c < cols; ++c)
+        {
+            const int i0 = (int) ((double) c / cols * n), i1 = std::max(i0 + 1, (int) ((double) (c + 1) / cols * n));
+            float mn = 0, mx = 0;
+            for (int i = i0; i < i1 && i < n; ++i) { const float v = 0.5f * (src.audio.getSample(0, i) + src.audio.getSample(1, i)); mn = std::min(mn, v); mx = std::max(mx, v); }
+            const float x = w.getX() + c;
+            const bool inPart = x >= xa && x <= xb;
+            g.setColour(inPart ? juce::Colour(0xffe9e3d8) : juce::Colour(0xff4a4946));
+            g.drawVerticalLine((int) x, w.getCentreY() - mx * w.getHeight() * sc, w.getCentreY() - mn * w.getHeight() * sc + 1.f);
+        }
+        g.setColour(juce::Colours::white.withAlpha(0.06f)); g.drawHorizontalLine((int) w.getCentreY(), w.getX(), w.getRight());
+        // the loop (what repeats) under the waveform
+        g.setColour(orange); g.fillRect(juce::Rectangle<float>(la, w.getBottom() + 3.f, std::max(2.f, lb - la), 2.f));
+        // the part's edges
+        for (int k = 0; k < 2; ++k)
+        {
+            const float x = k == 0 ? xa : xb;
+            g.setColour(orange.withAlpha(drag == k + 1 || hover == k + 1 ? 1.f : 0.8f)); g.fillRect(x - 0.75f, w.getY(), 1.5f, w.getHeight());
+            juce::Path t; t.addTriangle(x - 5.f, w.getY() - 1.f, x + 5.f, w.getY() - 1.f, x, w.getY() + 6.f); g.fillPath(t);
+        }
+        g.setColour(faint); g.setFont(mono(7.5f));
+        g.drawText("0 s", juce::Rectangle<float>(w.getX(), w.getBottom() + 6.f, 40.f, 10.f), juce::Justification::centredLeft);
+        g.drawText(juce::String(len, 2) + " s", juce::Rectangle<float>(w.getRight() - 50.f, w.getBottom() + 6.f, 50.f, 10.f), juce::Justification::centredRight);
+        g.setColour(dim);
+        g.drawText(ui::U("drag the edges · drag inside = move · double-click = automatic (the steadiest part)"),
+                   juce::Rectangle<float>(w.getX() + 40.f, w.getBottom() + 6.f, w.getWidth() - 90.f, 10.f), juce::Justification::centred);
+        // values
+        const float cents = (in.root - std::round(in.root)) * 100.f;
+        value(g, 0, "ROOT", juce::String(rc::noteName((int) std::lround(in.root))) + "  " + (cents >= 0 ? "+" : "") + juce::String(juce::roundToInt(cents)) + "c",
+              src.ed.fix != 0 ? "fixed " + juce::String(src.ed.fix > 0 ? "+" : "") + juce::String(src.ed.fix) : juce::String(in.namePc >= 0 ? "name + detected" : "detected"));
+        value(g, 1, "STRETCH", juce::String(src.ed.stretch, 2) + ui::U("×"), "drag up / down");
+        value(g, 2, "SEAM", src.ed.mode == 1 ? juce::String("cycle") : juce::String(juce::roundToInt(src.ed.xfade * 100)) + "%", "crossfade");
+        value(g, 3, "PART", juce::String(in.a, 2) + ui::U(" – ") + juce::String(in.b, 2) + " s", "loop " + juce::String(in.loopB - in.loopA, 2) + " s (LOOP knob)");
+        const char* rb[] = { "-12", "-1", "+1", "+12" };
+        for (int i = 0; i < 4; ++i)
+        {
+            const auto b = rootBtn(i);
+            g.setColour(juce::Colour(hover == 30 + i ? 0xff222222 : 0xff181818)); g.fillRoundedRectangle(b, 4.f);
+            g.setColour(juce::Colours::black.withAlpha(0.6f)); g.drawRoundedRectangle(b, 4.f, 1.f);
+            g.setColour(label); g.setFont(mono(8.f, true)); g.drawText(rb[i], b, juce::Justification::centred);
+        }
+    }
+    void mouseMove(const juce::MouseEvent& e) override { const int h = hit(e.position); if (h != hover) { hover = h; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (proc.samples.empty()) return;
+        auto& src = cur();
+        const int h = hit(e.position);
+        drag = 0; downY = e.position.y; downX = e.position.x;
+        if (h >= 10 && h < 20) { proc.sampleSel = h - 10; stopPlay(); }
+        else if (h == 20 || h == 21) { src.ed.mode = h - 20; changed(); }
+        else if (h == 22) { src.ed = rc::SampleEdit(); changed(); }
+        else if (h == 23) { if (proc.audition.load() >= 0) stopPlay(); else proc.audition = (int) std::lround(src.info.root) - 12 * (int) proc.apvts.getRawParameterValue("octave")->load(); }
+        else if (h == 24) { stopPlay(); proc.samples.erase(proc.samples.begin() + proc.sampleSel); proc.sampleSel = 0; changed(); }
+        else if (h >= 30 && h < 34) { const int d[] = { -12, -1, 1, 12 }; src.ed.fix = juce::jlimit(-36, 36, src.ed.fix + d[h - 30]); changed(); }
+        else if (h == 1 || h == 2) drag = h;
+        else if (h == 3) { drag = 3; downA = src.info.a; downB = src.info.b; }
+        else if (h == 40) { drag = 40; downV = src.ed.stretch; }
+        else if (h == 41 && src.ed.mode == 0) { drag = 41; downV = src.ed.xfade; }
+        repaint();
+    }
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (proc.samples.empty() || drag == 0) return;
+        auto& src = cur();
+        const double len = src.audio.getNumSamples() / src.rate;
+        const double t = timeOf(e.position.x);
+        if (drag == 1) { src.ed.a = juce::jlimit(0.0, src.info.b - 0.05, t); src.ed.b = src.info.b; }
+        else if (drag == 2) { src.ed.b = juce::jlimit(src.info.a + 0.05, len, t); src.ed.a = src.info.a; }
+        else if (drag == 3)
+        {
+            const double d = timeOf(e.position.x) - timeOf(downX), w = downB - downA;
+            const double a = juce::jlimit(0.0, len - w, downA + d);
+            src.ed.a = a; src.ed.b = a + w;
+        }
+        else if (drag == 40) src.ed.stretch = juce::jlimit(1.f, 4.f, downV + (downY - e.position.y) * 0.02f);
+        else if (drag == 41) src.ed.xfade = juce::jlimit(0.05f, 0.5f, downV + (downY - e.position.y) * 0.004f);
+        if (drag == 1 || drag == 2 || drag == 3) { src.info.a = src.ed.a; src.info.b = src.ed.b; }
+        changed();
+    }
+    void mouseUp(const juce::MouseEvent&) override { drag = 0; repaint(); }
+    void mouseDoubleClick(const juce::MouseEvent& e) override
+    {
+        if (proc.samples.empty()) return;
+        auto& src = cur();
+        const int h = hit(e.position);
+        if (h == 1 || h == 2 || h == 3 || wave().contains(e.position)) { src.ed.a = src.ed.b = -1; changed(); }
+        else if (h == 40) { src.ed.stretch = 1.f; changed(); }
+        else if (h == 41) { src.ed.xfade = 0.3f; changed(); }
+        else if (h == 42) { src.ed.fix = 0; changed(); }
+    }
+    void stopPlay() { proc.audition = -1; }
+private:
+    ReChordProcessor::SampleSrc& cur() { proc.sampleSel = juce::jlimit(0, (int) proc.samples.size() - 1, proc.sampleSel); return proc.samples[(size_t) proc.sampleSel]; }
+    void changed()
+    {
+        proc.sampleEdited();
+        if (proc.audition.load() >= 0 && !proc.samples.empty()) proc.audition = -1;     // replays when the new loop is in
+        if (onChange) onChange();
+        repaint();
+    }
+    juce::Rectangle<float> tab(int i) const { return { 14.f + i * 132.f, 10.f, 126.f, 22.f }; }
+    juce::Rectangle<float> btn(int i) const
+    {
+        const float w[] = { 50.f, 54.f, 48.f, 50.f, 64.f };
+        float x = (float) getWidth() - 14.f; for (int k = 4; k >= i; --k) x -= w[k] + 6.f;
+        return { x + 6.f, 10.f, w[i], 22.f };
+    }
+    juce::Rectangle<float> wave() const { return { 18.f, 46.f, (float) getWidth() - 36.f, 120.f }; }
+    juce::Rectangle<float> valueBox(int i) const { const float x[] = { 18.f, 250.f, 370.f, 490.f }, w[] = { 220.f, 110.f, 110.f, 250.f }; return { x[i], 200.f, w[i], 50.f }; }
+    juce::Rectangle<float> rootBtn(int i) const { return { 118.f + i * 30.f, 214.f, 27.f, 20.f }; }
+    void value(juce::Graphics& g, int i, const juce::String& title, const juce::String& v, const juce::String& sub) const
+    {
+        using namespace ui;
+        const auto b = valueBox(i);
+        g.setColour(label); g.setFont(mono(8.5f, true)); g.drawText(title, b.withHeight(12.f), juce::Justification::centredLeft);
+        g.setColour((i == 1 || i == 2) && (drag == 39 + i || hover == 39 + i) ? orange : white); g.setFont(mono(11.f, true));
+        g.drawText(v, juce::Rectangle<float>(b.getX(), b.getY() + 14.f, i == 0 ? 96.f : b.getWidth(), 18.f), juce::Justification::centredLeft);
+        g.setColour(faint); g.setFont(mono(7.5f)); g.drawText(sub, juce::Rectangle<float>(b.getX(), b.getY() + 34.f, b.getWidth(), 11.f), juce::Justification::centredLeft);
+    }
+    float xOf(double t) const { const auto& s = proc.samples[(size_t) proc.sampleSel]; const auto w = wave(); return w.getX() + (float) (t / (s.audio.getNumSamples() / s.rate)) * w.getWidth(); }
+    double timeOf(float x) const { const auto& s = proc.samples[(size_t) proc.sampleSel]; const auto w = wave(); return juce::jlimit(0.0, 1.0, (double) ((x - w.getX()) / w.getWidth())) * s.audio.getNumSamples() / s.rate; }
+    int hit(juce::Point<float> p) const
+    {
+        if (proc.samples.empty()) return -1;
+        for (int i = 0; i < (int) proc.samples.size(); ++i) if (tab(i).contains(p)) return 10 + i;
+        for (int i = 0; i < 5; ++i) if (btn(i).contains(p)) return 20 + i;
+        for (int i = 0; i < 4; ++i) if (rootBtn(i).contains(p)) return 30 + i;
+        const auto w = wave().expanded(0.f, 8.f);
+        if (w.contains(p))
+        {
+            const auto& in = proc.samples[(size_t) proc.sampleSel].info;
+            if (std::abs(p.x - xOf(in.a)) < 7.f) return 1;
+            if (std::abs(p.x - xOf(in.b)) < 7.f) return 2;
+            if (p.x > xOf(in.a) && p.x < xOf(in.b)) return 3;
+            return 4;
+        }
+        if (valueBox(1).contains(p)) return 40;
+        if (valueBox(2).contains(p)) return 41;
+        if (valueBox(0).withWidth(96.f).contains(p)) return 42;
+        return -1;
+    }
+    ReChordProcessor& proc;
+    int hover = -1, drag = 0;
+    float downY = 0, downX = 0, downV = 0;
+    double downA = 0, downB = 0;
+};
+
 class MovePad : public juce::Component
 {
 public:
@@ -1539,14 +1741,14 @@ public:
         dropping = false;
         juce::StringArray audio;
         for (auto& f : files) if (isAudio(f)) audio.add(f);
-        if (!audio.isEmpty()) proc.loadSamples(audio);
+        if (!audio.isEmpty() && proc.loadSamples(audio) > 0) openSample(true);
         else for (auto& f : files) if (isMidi(f)) { proc.loadMidiFile(juce::File(f)); break; }
         closePicker();
         view.setSel(-2, -1);
         refresh();
     }
     explicit Device(ReChordProcessor& p)
-        : proc(p), view(p), strip(p), picker(p), drag(p), mode(p), move(p), type(p), presetBox(p), presets(p),
+        : proc(p), view(p), strip(p), picker(p), drag(p), mode(p), move(p), sampleEd(p), type(p), presetBox(p), presets(p),
           kChar(p, "character", "CHARACTER"), kAttack(p, "attack", "ATTACK"), kBright(p, "bright", "BRIGHT"), kVib(p, "vibrato", "VIBRATO"),
           kRel(p, "release", "RELEASE"), kWarm(p, "warmth", "WARMTH"), kSpace(p, "space", "SPACE"),
           kSpread(p, "spread", "SPREAD"), kDouble(p, "double", "DOUBLE"),
@@ -1635,6 +1837,10 @@ public:
         redoB.setTooltip("Redo (Ctrl+Shift+Z / Ctrl+Y)");
         addAndMakeVisible(undoB); addAndMakeVisible(redoB);
         addChildComponent(move);
+        addChildComponent(sampleEd);
+        addChildComponent(sampleB);
+        sampleB.onClick = [this] { proc.audition = -1; openSample(!showSample); };
+        sampleEd.onChange = [this] { presetBox.repaint(); };
         setWantsKeyboardFocus(true);
         view.onSelection = [this] { const bool s = view.hasSelLink(); allB.setVisible(s); resetB.setVisible(s); };
 
@@ -1715,10 +1921,12 @@ public:
         strip.bars = b;
         strip.setBounds(24, 374, 912, 106);
         picker.setBounds(24 + 30, 222, 912 - 60, 128);
-        allB.setBounds(24 + 912 - 284, 96 + 262 - 26, 56, 20);
-        resetB.setBounds(24 + 912 - 222, 96 + 262 - 26, 68, 20);
-        undoB.setBounds(24 + 912 - 140, 96 + 262 - 26, 60, 20);
-        redoB.setBounds(24 + 912 - 76, 96 + 262 - 26, 60, 20);
+        allB.setBounds(24 + 912 - 380, 96 + 262 - 26, 56, 20);
+        resetB.setBounds(24 + 912 - 318, 96 + 262 - 26, 68, 20);
+        undoB.setBounds(24 + 912 - 236, 96 + 262 - 26, 60, 20);
+        redoB.setBounds(24 + 912 - 172, 96 + 262 - 26, 60, 20);
+        sampleB.setBounds(24 + 912 - 104, 96 + 262 - 26, 90, 20);
+        sampleEd.setBounds(24, 96, 912, 262);
 
         tabs.setBounds(24, 506, 108, 120);
         showTab();
@@ -1741,6 +1949,16 @@ public:
         drag.repaint();
         smartB.setToggleState(!proc.score.edited, juce::dontSendNotification);
         undoB.setEnabled(proc.canUndo()); redoB.setEnabled(proc.canRedo());
+        {
+            const bool smp = (int) proc.apvts.getRawParameterValue("osc")->load() == rc::OscSample;
+            if (!smp && showSample) { showSample = false; proc.audition = -1; }
+            sampleB.setVisible(smp);
+            sampleB.setButtonText(showSample ? "CHORDS" : "SAMPLE EDIT");
+            sampleEd.setVisible(showSample);
+            if (showSample) { sampleEd.repaint(); sampleB.toFront(false); }
+            undoB.setVisible(!showSample); redoB.setVisible(!showSample);
+            if (showSample) { allB.setVisible(false); resetB.setVisible(false); }
+        }
         learnB.setToggleState(proc.learnState.load() != 0, juce::dontSendNotification);
         const int nb = proc.pattern.activeBars();
         view.learnText = proc.learnState.load() == 1 ? "LEARN: waiting for Cubase to play - the next bar line starts " + juce::String(nb) + " bars"
@@ -1763,7 +1981,7 @@ private:
                              {
                                  juce::StringArray paths;
                                  for (auto& f : fc.getResults()) paths.add(f.getFullPathName());
-                                 if (!paths.isEmpty()) proc.loadSamples(paths);
+                                 if (!paths.isEmpty() && proc.loadSamples(paths) > 0) showSample = true;
                                  refresh();
                              });
     }
@@ -1773,6 +1991,12 @@ private:
     ModeSwitch mode;
     MovePad move;
     juce::TextButton undoB { "UNDO" }, redoB { "REDO" };
+    SampleEditor sampleEd;
+    juce::TextButton sampleB { "SAMPLE EDIT" };
+    bool showSample = false;
+public:
+    void openSample(bool on) { showSample = on; refresh(); }
+private:
     TypeSwitch type;
     PresetBox presetBox;
     PresetPanel presets;

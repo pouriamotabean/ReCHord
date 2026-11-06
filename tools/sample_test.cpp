@@ -1,6 +1,7 @@
 // load sustained-note WAVs into SAMPLE, print the zones, render the pattern, look for clicks at the loop seams
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_formats/juce_audio_formats.h>
+#define private public
 #include "../Source/Presets.h"
 #define private public
 #include "../Source/PluginProcessor.h"
@@ -15,7 +16,44 @@ int main(int argc, char** argv)
     const int n = proc.loadSamples(files);
     std::printf("loaded %d zones in %.0f ms, osc %.0f, label '%s' / '%s'\n", n, juce::Time::getMillisecondCounterHiRes() - t0,
                 proc.apvts.getRawParameterValue("osc")->load(), proc.sampleLabel().toRawUTF8(), proc.sampleDetail().toRawUTF8());
-    for (auto& z : proc.sampleSet->zones) std::printf("  %-16s root %.2f (%s) loop %d samples = %.2f s\n", z.name.c_str(), z.root, z.rootFromName ? "name" : "detected", z.len, z.len / z.rate);
+    for (auto& z : proc.sampleSet->zones) std::printf("  %-16s root %.2f loop %d samples = %.2f s\n", z.name.c_str(), z.root, z.len, z.len / z.rate);
+    for (auto& s : proc.samples) std::printf("  %-16s detected %.2f name pc %d oct %d  part %.2f-%.2f (auto %.2f-%.2f) loop %.2f-%.2f\n", s.name.toRawUTF8(), s.info.detected, s.info.namePc, s.info.nameOct, s.info.a, s.info.b, s.info.autoA, s.info.autoB, s.info.loopA, s.info.loopB);
+    // stretch x2 and cycle on the first file
+    if (argc > 1 && std::getenv("STRETCH")) { proc.samples[0].ed.stretch = (float) atof(std::getenv("STRETCH")); }
+    if (argc > 1 && std::getenv("CYCLE")) { proc.samples[0].ed.mode = 1; }
+    proc.rebuildSamples();
+    std::printf("  after edits: loop %.3f s root %.2f\n", proc.sampleSet->zones[0].len / proc.sampleSet->zones[0].rate, proc.sampleSet->zones[0].root);
+    {
+        // the loop itself, played 3 times: level per 20 ms, and the worst jump at the seams
+        const auto& z = proc.sampleSet->zones[0];
+        const int n = z.len, w = (int) (z.rate * 0.02);
+        float mn = 1e9f, mx = -1e9f;
+        for (int s0 = 0; s0 + w <= 3 * n; s0 += w / 2)
+        {
+            double e = 0; for (int j = 0; j < w; ++j) { const float v = z.lv[0][0][(size_t) ((s0 + j) % n)]; e += v * v; }
+            const float d = (float) (10 * std::log10(e / w + 1e-12)); mn = std::min(mn, d); mx = std::max(mx, d);
+        }
+        std::printf("  loop level over 3 rounds: swing %.2f dB\n", mx - mn);
+    }
+    {
+        // one held note (the PLAY of the page), dry: the level over 4 s, 50 ms steps
+        proc.apvts.getParameter("space")->setValueNotifyingHost(0.f);
+        proc.apvts.getParameter("listen")->setValueNotifyingHost(0.f);
+        proc.apvts.getParameter("warmth")->setValueNotifyingHost(0.f);
+        proc.audition = (int) std::lround(proc.sampleSet->zones[0].root);
+        juce::AudioBuffer<float> buf(2, 512); juce::MidiBuffer mb;
+        std::vector<float> lv; double acc = 0; int cnt = 0;
+        for (int blk = 0; blk < 48000 * 5 / 512; ++blk)
+        {
+            proc.processBlock(buf, mb);
+            for (int i = 0; i < 512; ++i) { { const float m = 0.5f * (buf.getSample(0, i) + buf.getSample(1, i)); acc += m * m; } if (++cnt == 2400) { lv.push_back((float) (10 * std::log10(acc / cnt + 1e-12))); acc = 0; cnt = 0; } }
+        }
+        float mn = 1e9f, mx = -1e9f; for (size_t i = 20; i < lv.size(); ++i) { mn = std::min(mn, lv[i]); mx = std::max(mx, lv[i]); }
+        for (size_t i = 0; i < lv.size(); i += 4) std::printf("%.0f ", lv[i]); std::printf("\n");
+        std::printf("  engine zone len %d, osc %d\n", proc.engine.sample ? proc.engine.sample->zones[0].len : -1, proc.engine.prm.osc);
+        std::printf("  held note 1-5 s: level %.1f .. %.1f dB (swing %.1f dB)\n", mn, mx, mx - mn);
+        proc.audition = -1;
+    }
     // seam check on level 0: jump across the wrap vs typical step
     for (auto& z : proc.sampleSet->zones)
     {

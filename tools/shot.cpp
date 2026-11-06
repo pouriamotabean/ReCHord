@@ -94,6 +94,9 @@ int main(int argc, char** argv)
         juce::StringArray sf; for (int i = 3; i < argc; ++i) sf.add(argv[i]);
         std::printf("samples: %d\n", proc.loadSamples(sf));
         snap("l_sample.png");
+        dev->openSample(true);
+        snap("m_sample_edit.png");
+        dev->openSample(false);
     }
     juce::MemoryBlock mb; proc.getStateInformation(mb);
     ReChordProcessor p2; p2.setStateInformation(mb.getData(), (int) mb.getSize());
