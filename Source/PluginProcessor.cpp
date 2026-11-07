@@ -120,8 +120,10 @@ juce::String ReChordProcessor::slotName(int i) const
 void ReChordProcessor::publish()
 {
     {
+        rc::LaneCache c; c.build(score);               // the heavy part, here and not on the audio thread
         const juce::SpinLock::ScopedLockType sl(scoreLock);
         audioScore = score;
+        audioCache = c;
         scoreDirty = true;
     }
     ++modelVersion;
@@ -277,7 +279,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     for (int c = 2; c < buffer.getNumChannels(); ++c) buffer.clear(c, 0, n);
     {
         const juce::SpinLock::ScopedTryLockType sl(scoreLock);
-        if (sl.isLocked() && scoreDirty) { engine.setScore(audioScore); scoreDirty = false; }
+        if (sl.isLocked() && scoreDirty) { engine.setScore(audioScore, audioCache); scoreDirty = false; }
         if (sl.isLocked() && sampleDirty && retiredSample == nullptr) { retiredSample = engine.swapSample(pendingSample); sampleDirty = false; }
     }
     engine.setParams(currentParams());
@@ -291,6 +293,10 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
             if (auto b = pos->getBpm()) bpm = *b;
             if (auto p = pos->getPpqPosition()) ppq = *p;
             if (auto ts = pos->getTimeSignature()) if (ts->numerator > 0 && ts->denominator > 0) barBeats = ts->numerator * 4.0 / ts->denominator;
+            // bar 1 is not always at ppq 0 (a meter change, a pickup): count from Cubase's own bar lines
+            if (auto bs = pos->getPpqPositionOfLastBarStart())
+                if (auto bc = pos->getBarCount())
+                    if (*bc >= 0 && *bs <= ppq + 1e-6) ppq = (double) *bc * barBeats + (ppq - *bs);
         }
     bpm = juce::jlimit(20.0, 400.0, bpm);
     hostBpm = bpm;
@@ -301,15 +307,14 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     //      between chords still glides ----
     const double spb = getSampleRate() * 60.0 / bpm;
     // ---- LEARN: armed -> records from the next bar line, for the bars that are on, of Cubase playback ----
-    if (learnState.load() == 1 && hostPlaying)
+    if (int armed = 1; hostPlaying && learnState.compare_exchange_strong(armed, 2))
     {
         learnStart = -1.0;                                                   // set by the first note: its bar is bar 1
         learnBarBeats = barBeats;
         learnCount = 0;
         learnLastPpq = ppq;
-        learnState = 2;
     }
-    if (learnState.load() == 2 && hostPlaying && ppq < learnLastPpq - 0.01) learnState = 3;   // Cubase cycled back: one pass is enough
+    if (int rec = 2; hostPlaying && ppq < learnLastPpq - 0.01) learnState.compare_exchange_strong(rec, 3);   // Cubase cycled back: one pass is enough
     for (const auto m : midi)
     {
         const auto msg = m.getMessage();
@@ -396,7 +401,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     if (learnState.load() == 2)
     {
         learnLastPpq = ppq;
-        if (!hostPlaying || (learnStart >= 0 && ppq + n / spb >= learnStart + rc::kMaxBars * learnBarBeats)) learnState = 3;
+        if (!hostPlaying || (learnStart >= 0 && ppq + n / spb >= learnStart + rc::kMaxBars * learnBarBeats)) { int rec = 2; learnState.compare_exchange_strong(rec, 3); }
         learnPos = hostPlaying && learnStart >= 0 ? (ppq - learnStart) / learnBarBeats : -1.0;
     }
 
@@ -410,7 +415,7 @@ void ReChordProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     {
         playing = true;
         beat = freeBeat;
-        freeBeat = std::fmod(freeBeat + n * bpm / 60.0 / getSampleRate(), rc::kMaxBars * barBeats * 12.0);
+        freeBeat = std::fmod(freeBeat + n * bpm / 60.0 / getSampleRate(), std::max(1, audioScore.nBars) * barBeats * 12.0 * 64.0);
     }
     else freeBeat = 0;
 
@@ -664,6 +669,7 @@ void ReChordProcessor::getStateInformation(juce::MemoryBlock& dest)
 
 void ReChordProcessor::setStateInformation(const void* data, int size)
 {
+    undoStack.clear(); redoStack.clear();
     auto xml = getXmlFromBinary(data, size);
     if (xml == nullptr) return;
     auto st = juce::ValueTree::fromXml(*xml);
@@ -695,6 +701,8 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
         juce::StringArray onA; onA.addTokens(m.getProperty("on").toString(), " ", "");
         const bool eight = (int) m.getProperty("bars", 4) == 8;     // 1.8 saved a 4 / 8 switch
         for (int b = 0; b < rc::kMaxBars; ++b) pattern.on[b] = onA.size() == rc::kMaxBars ? onA[b].getIntValue() != 0 : (b < 4 || eight);
+        bool any = false; for (bool b : pattern.on) any = any || b;
+        if (!any) pattern.on[0] = true;
     }
     if (ends.size() == 4)
     {
@@ -735,6 +743,13 @@ void ReChordProcessor::setStateInformation(const void* data, int size)
             s.linkAt(t, v) = l;
         }
     }
+    for (int t = -1; t < ns; ++t)
+        for (int v = 0; v < rc::kMaxVoices; ++v)
+        {
+            auto& l = s.linkAt(t, v);
+            if (v >= nv || l.to < 0 || l.to >= rc::kMaxVoices) l.to = v;
+            l.early = juce::jlimit(0.f, 4.f, l.early); l.late = juce::jlimit(0.f, 4.f, l.late); l.curve = juce::jlimit(-1.f, 1.f, l.curve);
+        }
     s.edited = (bool) m.getProperty("edited", false);
     score = s;
     publish();
@@ -824,7 +839,7 @@ int ReChordProcessor::loadSamples(const juce::StringArray& files)
     {
         const juce::File f(path);
         std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(f));
-        if (r == nullptr || r->lengthInSamples < (juce::int64) (r->sampleRate * 0.15)) continue;
+        if (r == nullptr || r->sampleRate < 8000 || r->sampleRate > 384000 || r->lengthInSamples < (juce::int64) (r->sampleRate * 0.15)) continue;
         const int n = (int) std::min<juce::int64>(r->lengthInSamples, (juce::int64) (r->sampleRate * 20.0));   // 20 s is plenty
         SampleSrc src; src.name = f.getFileNameWithoutExtension(); src.rate = r->sampleRate;
         src.audio.setSize(2, n);
@@ -893,6 +908,8 @@ juce::ValueTree ReChordProcessor::samplesTree() const
     juce::ValueTree sm("samples");
     for (auto& src : samples)
     {
+        if (src.b64.isEmpty())
+        {
         juce::MemoryBlock mb;
         {
             auto os = std::make_unique<juce::MemoryOutputStream>(mb, false);
@@ -904,12 +921,14 @@ juce::ValueTree ReChordProcessor::samplesTree() const
                 writer->writeFromAudioSampleBuffer(src.audio, 0, src.audio.getNumSamples());
             }
         }
+        src.b64 = mb.toBase64Encoding();
+        }
         juce::ValueTree one("sample");
         one.setProperty("name", src.name, nullptr);
         one.setProperty("a", src.ed.a, nullptr); one.setProperty("b", src.ed.b, nullptr);
         one.setProperty("stretch", src.ed.stretch, nullptr); one.setProperty("xfade", src.ed.xfade, nullptr);
         one.setProperty("mode", src.ed.mode, nullptr); one.setProperty("fix", src.ed.fix, nullptr);
-        one.setProperty("wav", mb.toBase64Encoding(), nullptr);
+        one.setProperty("wav", src.b64, nullptr);
         sm.appendChild(one, nullptr);
     }
     return sm;

@@ -123,12 +123,13 @@ inline float detectPitch(const std::vector<float>& x, int a, int b, double rate)
         }
         // parabolic refinement
         double t = best;
-        if (best > 1 && best < tauMax - 1)
+        if (best > tauMin && best < tauMax - 1)
         {
             const double y0 = cm[(size_t) best - 1], y1 = cm[(size_t) best], y2 = cm[(size_t) best + 1], den = y0 - 2 * y1 + y2;
-            if (std::abs(den) > 1e-12) t = best + 0.5 * (y0 - y2) / den;
+            if (y1 <= y0 && y1 <= y2 && den > 1e-12) t = best + std::clamp(0.5 * (y0 - y2) / den, -1.0, 1.0);   // only at a real minimum
         }
-        found.push_back((float) (69.0 + 12.0 * std::log2(rate / t / 440.0)));
+        const double midi = 69.0 + 12.0 * std::log2(rate / t / 440.0);
+        if (t > 0 && std::isfinite(midi)) found.push_back((float) midi);
     }
     if (found.empty()) return 0.f;
     std::sort(found.begin(), found.end());
@@ -276,7 +277,7 @@ inline bool buildZone(SampleZone& z, SampleInfo& info, const std::vector<float>&
                       const std::string& name, const SampleEdit& ed, float loopAmt)
 {
     const int N = (int) inL.size();
-    if (N < (int) (rate * 0.1)) return false;
+    if (!(rate >= 8000.0 && rate <= 400000.0) || N < (int) (rate * 0.1) || inR.size() != inL.size()) return false;
     std::vector<float> mono((size_t) N);
     for (int i = 0; i < N; ++i) mono[(size_t) i] = 0.5f * (inL[(size_t) i] + inR[(size_t) i]);
     steadiest(mono, rate, info.autoA, info.autoB);
@@ -342,7 +343,7 @@ inline bool buildZone(SampleZone& z, SampleInfo& info, const std::vector<float>&
         // LOOP: as long as the LOOP knob says; the end is moved to where it really matches the start
         const double lmin = std::min(rate * 0.25, M * 0.4), lmax = std::min(M * 0.82, rate * 8.0);   // 8 s of loop is plenty
         Lp = (int) (lmin + (lmax - lmin) * std::clamp(loopAmt, 0.f, 1.f));
-        X = (int) std::clamp((double) Lp * std::clamp(ed.xfade, 0.05f, 0.5f), 64.0, (double) (M - Lp) - 2);
+        X = (int) std::max(64.0, std::min((double) Lp * std::clamp(ed.xfade, 0.05f, 0.5f), (double) (M - Lp) - 2));
         if (X < 32) { X = std::min(Lp / 3, 32); Lp = std::max(64, M - X - 2); }
         s0 = X + std::max(0, (M - X - Lp) / 2);
         if (s0 + Lp > M) Lp = M - s0;

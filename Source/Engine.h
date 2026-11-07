@@ -250,9 +250,22 @@ public:
         bodies = BodyBank::get(sr);
     }
     void setScore(const Score& s) { score = s; cache.build(score); }
+    void setScore(const Score& s, const LaneCache& c) { score = s; cache = c; }     // the audio thread: built elsewhere
     void setSample(std::shared_ptr<const SampleSet> s) { sample = std::move(s); }
     // the audio thread: take the new set, hand back the old one (the message thread lets it go)
-    std::shared_ptr<const SampleSet> swapSample(std::shared_ptr<const SampleSet> s) { std::swap(sample, s); return s; }
+    std::shared_ptr<const SampleSet> swapSample(std::shared_ptr<const SampleSet> s)
+    {
+        std::swap(sample, s);
+        if (sample != nullptr && !sample->zones.empty())
+            for (auto& v : voices)
+                if (v.active)
+                {
+                    v.zone = sample->nearest(v.pitch);
+                    const double n = (double) sample->zones[(size_t) v.zone].len;
+                    for (auto& p : v.ph) { p = std::fmod(p, n); if (!(p >= 0.0 && p < n)) p = 0.0; }
+                }
+        return s;
+    }
     void setParams(const Params& p) { prm = p; }
 
     // ---- the keyboard: the notes now held (sorted, max 8). Each new chord glides from the last one ----
@@ -281,9 +294,16 @@ public:
             }
         int i = no, j = n;
         const float lowest = n > 0 ? (float) (notes[0] + prm.liveShift) : 0.f, highest = n > 0 ? (float) (notes[n - 1] + prm.liveShift) : 0.f;
-        while (i > 0 || j > 0)
+        // the path first; then the lanes that end, so a new note always finds a free lane
+        struct Step { int h, i, j; };
+        Step path[2 * kLive + 2]; int np = 0;
+        while ((i > 0 || j > 0) && np < 2 * kLive + 2) { const int h = how[i][j]; path[np++] = { h, i, j }; if (h == 1) { --i; --j; } else if (h == 2) --i; else --j; }
+        for (int pass = 0; pass < 2; ++pass)
+        for (int q = 0; q < np; ++q)
         {
-            const int h = how[i][j];
+            const int h = path[q].h;
+            if ((pass == 0) != (h == 2)) continue;
+            i = path[q].i; j = path[q].j;
             if (h == 1)
             {
                 auto& L = live[oldLane[i - 1]];
@@ -302,9 +322,9 @@ public:
                 const float p = (float) (notes[j - 1] + prm.liveShift);
                 // a note added to a chord that is already sounding grows out of the nearest note (below first) and glides in
                 float src = p; bool grow = false, below = false; float best = 1e9f;
-                for (int q = 0; q < no; ++q)
+                for (int o = 0; o < no; ++o)
                 {
-                    const auto& O = live[oldLane[q]];
+                    const auto& O = live[oldLane[o]];
                     if (O.voice < 0) continue;
                     const float d = p - O.cur;
                     const bool b = d >= 0;

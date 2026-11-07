@@ -1,7 +1,7 @@
 ; Windows installer for ReChord (Inno Setup 6). Built by GitHub Actions: iscc installer\ReChord.iss
 ; A new version replaces the installed one.
 #define AppName "ReChord"
-#define AppVersion "2.5.5"
+#define AppVersion "2.5.6"
 #define Publisher "Pouria Motabean"
 
 [Setup]

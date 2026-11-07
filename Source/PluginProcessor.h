@@ -4,7 +4,7 @@
 #include "Presets.h"
 
 #ifndef RECHORD_VERSION
- #define RECHORD_VERSION "2.5.5"
+ #define RECHORD_VERSION "2.5.6"
 #endif
 
 class ReChordProcessor : public juce::AudioProcessor, private juce::Timer
@@ -113,6 +113,7 @@ private:
     rc::Engine engine;
     juce::SpinLock scoreLock;
     rc::Score audioScore;
+    rc::LaneCache audioCache;
     bool scoreDirty = true;
     double freeBeat = 0;
     std::atomic<double> seekBeat { -1.0 };
@@ -128,7 +129,7 @@ private:
     double learnStart = 0, learnBarBeats = 4, learnLastPpq = 0;
     struct Snap { rc::Pattern pattern; rc::Score score; };
 public:
-    struct SampleSrc { juce::String name; double rate = 48000; juce::AudioBuffer<float> audio; rc::SampleEdit ed; rc::SampleInfo info; };
+    struct SampleSrc { juce::String name; double rate = 48000; juce::AudioBuffer<float> audio; rc::SampleEdit ed; rc::SampleInfo info; mutable juce::String b64; };
     std::vector<SampleSrc> samples;              // message thread (the SAMPLE EDIT page reads and edits these)
     int sampleSel = 0;
     void sampleEdited() { builtLoop = -1.f; editAt = juce::Time::getMillisecondCounterHiRes(); editPending = true; }
